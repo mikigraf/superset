@@ -1,5 +1,5 @@
 /**
- * Streaming parsers for the providers' own transcript files — the same
+ * Streaming parsers for the agents' own transcript files — the same
  * source ccusage and T3 Code read, so usage is complete even for turns not
  * driven through Superset.
  *
@@ -16,12 +16,11 @@
 
 import { createReadStream } from "node:fs";
 import { basename } from "node:path";
-import { createInterface } from "node:readline";
-import type { UsageProvider } from "../types";
+import type { UsageAgent } from "../types";
 import type { LogFile } from "./logs";
 
 export interface UsageLogEntry {
-	provider: UsageProvider;
+	agent: UsageAgent;
 	model: string;
 	timestampMs: number;
 	cwd: string | null;
@@ -33,6 +32,9 @@ export interface UsageLogEntry {
 	cacheWrite1h: number;
 	output: number;
 	reasoningOutput: number;
+	/** Agent-reported real cost in USD (opencode/pi/fx/cursor record one).
+	 * When present it replaces the API-list-rate estimate. */
+	costUsd?: number;
 }
 
 export function sessionIdForFile(path: string): string {
@@ -43,7 +45,7 @@ const SESSION_LABEL_MAX = 80;
 
 /** First real user prompt of a session, trimmed to one short line. Command
  * invocations, caveats, and system-reminder wrappers don't count. */
-function toSessionLabel(text: unknown): string | null {
+export function toSessionLabel(text: unknown): string | null {
 	if (typeof text !== "string") return null;
 	const trimmed = text.trim();
 	if (
@@ -61,22 +63,64 @@ function toSessionLabel(text: unknown): string | null {
 		: line;
 }
 
-async function forEachLine(
+/** Longest line handed to a parser. Real transcript lines top out in the
+ * single-digit MB (5.8 MB was the largest across 90 days of heavy Claude and
+ * Codex use), so anything past this is a corrupt or foreign file, not usage.
+ * The bound is what keeps a data file from killing the worker: V8 refuses
+ * strings past ~512 MB, and node:readline buffered a newline-free run
+ * without limit, throwing `RangeError: Invalid string length` from inside
+ * the stream's data callback — unreachable by any try/catch around the
+ * iteration, so it took the worker thread down and hung the inline retry. */
+export const MAX_LINE_LENGTH = 32 * 1024 * 1024;
+
+/** Calls `onLine` for every `\n`-terminated line of a UTF-8 file (a trailing
+ * `\r` is stripped). A line longer than MAX_LINE_LENGTH is skipped and the
+ * file continues at the next newline. */
+export async function forEachLine(
 	path: string,
 	onLine: (line: string) => void,
 ): Promise<void> {
+	let pending = "";
+	let skipping = false;
+	const emit = (raw: string) => {
+		// Strip the CR before measuring so LF and CRLF files share one bound.
+		const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
+		if (line.length <= MAX_LINE_LENGTH) onLine(line);
+	};
 	try {
-		const rl = createInterface({
-			input: createReadStream(path, { encoding: "utf-8" }),
-			crlfDelay: Number.POSITIVE_INFINITY,
-		});
-		for await (const line of rl) onLine(line);
+		const chunks = createReadStream(path, {
+			encoding: "utf-8",
+		}) as AsyncIterable<string>;
+		for await (const chunk of chunks) {
+			let start = 0;
+			for (
+				let end = chunk.indexOf("\n");
+				end !== -1;
+				end = chunk.indexOf("\n", start)
+			) {
+				if (skipping) {
+					skipping = false;
+				} else {
+					const line = pending + chunk.slice(start, end);
+					pending = "";
+					emit(line);
+				}
+				start = end + 1;
+			}
+			if (skipping) continue;
+			pending += chunk.slice(start);
+			if (pending.length > MAX_LINE_LENGTH) {
+				pending = "";
+				skipping = true;
+			}
+		}
+		if (!skipping && pending) emit(pending);
 	} catch {
 		// Unreadable or vanished mid-scan — skip the file.
 	}
 }
 
-function num(value: unknown): number {
+export function num(value: unknown): number {
 	// Clamp negatives — a corrupt count must not subtract from totals.
 	return typeof value === "number" && Number.isFinite(value) && value > 0
 		? value
@@ -85,7 +129,10 @@ function num(value: unknown): number {
 
 /** Entry timestamp: parseable and not in the future (26h clock-skew
  * tolerance) wins; otherwise the file's mtime; never NaN. */
-function entryTimestamp(raw: string | undefined, mtimeMs: number): number {
+export function entryTimestamp(
+	raw: string | undefined,
+	mtimeMs: number,
+): number {
 	const parsed = raw ? Date.parse(raw) : Number.NaN;
 	if (Number.isFinite(parsed) && parsed <= Date.now() + 26 * 60 * 60 * 1000) {
 		return parsed;
@@ -171,7 +218,7 @@ export async function parseClaudeLogFile(
 		const write5m = num(usage.cache_creation?.ephemeral_5m_input_tokens);
 		const write1h = num(usage.cache_creation?.ephemeral_1h_input_tokens);
 		const entry: UsageLogEntry = {
-			provider: "claude",
+			agent: "claude",
 			model,
 			timestampMs,
 			cwd: typeof parsed.cwd === "string" ? parsed.cwd : null,
@@ -278,7 +325,7 @@ export async function parseCodexLogFile(
 		const input = num(usage.input_tokens);
 		const cached = num(usage.cached_input_tokens);
 		out.push({
-			provider: "codex",
+			agent: "codex",
 			model: currentModel ?? "unknown",
 			timestampMs,
 			cwd: currentCwd,

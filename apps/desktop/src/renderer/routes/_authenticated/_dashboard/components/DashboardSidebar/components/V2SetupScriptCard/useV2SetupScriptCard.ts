@@ -1,8 +1,9 @@
+import { useLingui } from "@lingui/react/macro";
 import { useQuery } from "@tanstack/react-query";
 import type { SidebarCardEntry } from "renderer/components/SidebarCardSlot";
+import { useOpenNewWorkspace } from "renderer/hooks/useOpenNewWorkspace";
 import { getHostServiceClientByUrl } from "renderer/lib/host-service-client";
 import { useNewWorkspaceDraftStore } from "renderer/stores/new-workspace-draft";
-import { useOpenNewWorkspaceModal } from "renderer/stores/new-workspace-modal";
 import { useV2SetupCardDismissalsStore } from "renderer/stores/v2-setup-card-dismissals";
 import setupScriptPrompt from "./setup-script-prompt.md?raw";
 
@@ -15,7 +16,8 @@ export function useV2SetupScriptCard({
 	projectId: string | null;
 	projectName: string | null;
 }): SidebarCardEntry | null {
-	const openNewWorkspaceModal = useOpenNewWorkspaceModal();
+	const { t } = useLingui();
+	const openNewWorkspace = useOpenNewWorkspace();
 	const isDismissed = useV2SetupCardDismissalsStore((s) =>
 		projectId ? s.isDismissed(projectId) : false,
 	);
@@ -39,10 +41,18 @@ export function useV2SetupScriptCard({
 
 	return {
 		id: `setup-script:${projectId}`,
-		badge: "Setup",
-		title: "Lifecycle scripts",
-		description: `Automate workspace setup for ${projectName}`,
-		actionLabel: "Configure",
+		badge: t({
+			message: "Setup",
+		}),
+		title: t({
+			message: "Lifecycle scripts",
+		}),
+		description: t({
+			message: `Automate workspace setup for ${projectName}`,
+		}),
+		actionLabel: t({
+			message: "Configure",
+		}),
 		// Configure → open the new-workspace modal seeded with a prompt that walks
 		// the agent through writing setup/teardown scripts for this project, rather
 		// than sending the user to the settings page to hand-write config.json.
@@ -50,7 +60,7 @@ export function useV2SetupScriptCard({
 			const draftStore = useNewWorkspaceDraftStore.getState();
 			draftStore.resetDraft();
 			draftStore.updateDraft({ prompt: setupScriptPrompt });
-			openNewWorkspaceModal(projectId);
+			openNewWorkspace(projectId);
 		},
 		onDismiss: () => dismiss(projectId),
 	};

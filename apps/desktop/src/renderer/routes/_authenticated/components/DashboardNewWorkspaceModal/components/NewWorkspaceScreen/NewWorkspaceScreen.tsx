@@ -1,5 +1,7 @@
+import { Trans, useLingui } from "@lingui/react/macro";
 import {
 	getAgentEffortSupport,
+	getAgentEfforts,
 	getAgentModelSupport,
 	getAgentModeSupport,
 } from "@superset/shared/agent-models";
@@ -42,11 +44,13 @@ import { useAgentLaunchPreferences } from "renderer/hooks/useAgentLaunchPreferen
 import { useAgentModelPreference } from "renderer/hooks/useAgentModelPreference";
 import { useAgentModePreference } from "renderer/hooks/useAgentModePreference";
 import { useRelayUrl } from "renderer/hooks/useRelayUrl";
+import { useSelectedHostProjectIds } from "renderer/hooks/useSelectedHostProjectIds";
 import { useV2AgentChoices } from "renderer/hooks/useV2AgentChoices";
+import { CLOUD_AGENT_CHOICES } from "renderer/hooks/useV2AgentChoices/cloud-agent-choices";
 import { track } from "renderer/lib/analytics";
+import { cloudTrpc } from "renderer/lib/cloud-trpc";
 import { electronTrpc } from "renderer/lib/electron-trpc";
 import { showHostServiceUnavailableToast } from "renderer/lib/host-service-unavailable";
-import { SupersetIcon } from "renderer/routes/_authenticated/onboarding/providers/components/SupersetIcon";
 import { useHostWorkspaces } from "renderer/routes/_authenticated/providers/HostWorkspacesProvider";
 import { useLocalHostService } from "renderer/routes/_authenticated/providers/LocalHostServiceProvider";
 import { newWorkspaceAttachmentPaths } from "renderer/stores/new-workspace-attachments";
@@ -67,6 +71,7 @@ import { DevicePicker } from "../DashboardNewWorkspaceForm/components/DevicePick
 import { CLOUD_HOST_ID } from "../DashboardNewWorkspaceForm/components/DevicePicker/DevicePicker";
 import { useWorkspaceHostOptions } from "../DashboardNewWorkspaceForm/components/DevicePicker/hooks/useWorkspaceHostOptions";
 import { CompareBaseBranchPicker } from "../DashboardNewWorkspaceForm/PromptGroup/components/CompareBaseBranchPicker";
+import { EnvironmentPickerPill } from "../DashboardNewWorkspaceForm/PromptGroup/components/EnvironmentPickerPill";
 import { GitHubIssueLinkCommand } from "../DashboardNewWorkspaceForm/PromptGroup/components/GitHubIssueLinkCommand";
 import { LinkedGitHubIssuePill } from "../DashboardNewWorkspaceForm/PromptGroup/components/LinkedGitHubIssuePill";
 import { LinkedPRPill } from "../DashboardNewWorkspaceForm/PromptGroup/components/LinkedPRPill";
@@ -88,12 +93,12 @@ import {
 	PILL_BUTTON_CLASS,
 	type WorkspaceCreateAgent,
 } from "../DashboardNewWorkspaceForm/PromptGroup/types";
-import { useSelectedHostProjectIds } from "../DashboardNewWorkspaceModalContent/hooks/useSelectedHostProjectIds";
 import { SymmetricResizeHandles } from "../SymmetricResizeHandles";
 import { AttachmentCard } from "./components/AttachmentCard";
 import { SamplePromptCards } from "./components/SamplePromptCards";
 import { SamplePrompts } from "./components/SamplePrompts";
 import { PROMPT_PLACEHOLDERS } from "./components/SamplePrompts/constants";
+import { SupersetIcon } from "./components/SupersetIcon";
 import { useSamplePromptSelection } from "./hooks/useSamplePromptSelection";
 
 /** Nested prefixes of one fixed pool — only the form factor varies by arm. */
@@ -114,19 +119,21 @@ interface NewWorkspaceScreenProps {
 	preSelectedProjectId: string | null;
 	/** Open with "No project" (session) preselected. */
 	preSelectedSession?: boolean;
+	/** Open targeting this host instead of the remembered one. */
+	preSelectedHostId?: string | null;
 }
 
 /**
- * Experiment test arm (new-workspace-screen flag): a purpose-built full-screen
- * take on workspace creation for new users — heading, sample prompts, and a
- * minimal composer. Independent of the control modal's PromptGroup so the two
- * arms can evolve separately.
+ * The v2 workspace-creation surface: heading, sample prompts, and a minimal
+ * composer, filling the window rather than a dialog.
  */
 export function NewWorkspaceScreen({
 	isOpen,
 	preSelectedProjectId,
 	preSelectedSession = false,
+	preSelectedHostId = null,
 }: NewWorkspaceScreenProps) {
+	const { t } = useLingui();
 	const navigate = useNavigate();
 	const [promptSeed, setPromptSeed] = useState(0);
 	const openInFinderMutation = electronTrpc.external.openInFinder.useMutation();
@@ -143,6 +150,15 @@ export function NewWorkspaceScreen({
 	const { activeHostUrl, machineId } = hostService;
 	const relayUrl = useRelayUrl();
 	const activeOrganizationId = useActiveOrganizationId();
+
+	const environmentsQuery = cloudTrpc.environment.list.useQuery(
+		{ organizationId: activeOrganizationId ?? "" },
+		{ enabled: draft.hostId === CLOUD_HOST_ID && !!activeOrganizationId },
+	);
+	const environmentOptions = environmentsQuery.data ?? [];
+	const selectedEnvironment =
+		environmentOptions.find((row) => row.id === draft.environmentId) ??
+		environmentOptions[0];
 	const setLastProjectId = useV2WorkspaceCreateDefaultsStore(
 		(state) => state.setLastProjectId,
 	);
@@ -319,13 +335,17 @@ export function NewWorkspaceScreen({
 		wasOpenRef.current = isOpen;
 	}, [isOpen]);
 	// biome-ignore lint/correctness/useExhaustiveDependencies: re-roll per draft reset and per open
-	const promptPlaceholder = useMemo(
-		() =>
+	const promptPlaceholder = useMemo(() => {
+		const descriptor =
 			PROMPT_PLACEHOLDERS[
 				Math.floor(Math.random() * PROMPT_PLACEHOLDERS.length)
-			] ?? "What do you want to do?",
-		[resetKey, placeholderRoll],
-	);
+			];
+		return descriptor
+			? t(descriptor)
+			: t({
+					message: "What do you want to do?",
+				});
+	}, [resetKey, placeholderRoll, t]);
 
 	const projectId = draft.selectedProjectId;
 	const selectedProject = projects.find((project) => project.id === projectId);
@@ -349,16 +369,30 @@ export function NewWorkspaceScreen({
 	} = useLinkedContext(draft.linkedIssues, updateDraft);
 
 	// Restore the last-used launch host once per mount, like the modal does.
+	// A host named in the URL (the sidebar's Cloud "+") wins, and applies when
+	// it arrives rather than only at mount — this screen stays mounted across
+	// navigations to it.
 	const appliedPersistedHostRef = useRef(false);
+	const appliedPreSelectedHostRef = useRef<string | null>(null);
 	useEffect(() => {
-		if (!isOpen || appliedPersistedHostRef.current) return;
+		if (!isOpen) return;
+		if (
+			preSelectedHostId &&
+			preSelectedHostId !== appliedPreSelectedHostRef.current
+		) {
+			appliedPreSelectedHostRef.current = preSelectedHostId;
+			appliedPersistedHostRef.current = true;
+			updateDraft({ hostId: preSelectedHostId });
+			return;
+		}
+		if (appliedPersistedHostRef.current) return;
 		appliedPersistedHostRef.current = true;
 		const persistedHostId =
 			useV2WorkspaceCreateDefaultsStore.getState().lastHostId;
 		if (typeof persistedHostId === "string") {
 			updateDraft({ hostId: persistedHostId });
 		}
-	}, [isOpen, updateDraft]);
+	}, [isOpen, preSelectedHostId, updateDraft]);
 
 	// Reset baseBranch on project or host change, defaulting to the user's
 	// last selected branch for that project — the draft store is global, so a
@@ -434,8 +468,12 @@ export function NewWorkspaceScreen({
 		setSamplePromptsDismissed(true);
 	}, [promptLayout, setSamplePromptsDismissed]);
 
-	const { agents: v2Agents, isFetched: v2AgentsFetched } =
+	const { agents: hostAgents, isFetched: hostAgentsFetched } =
 		useV2AgentChoices(launchHostUrl);
+	// Under Cloud the built-in presets stand in for a host's agent list.
+	const v2Agents =
+		draft.hostId === CLOUD_HOST_ID ? CLOUD_AGENT_CHOICES : hostAgents;
+	const v2AgentsFetched = draft.hostId === CLOUD_HOST_ID || hostAgentsFetched;
 	const selectableAgentIds = useMemo(
 		() => v2Agents.map((agent) => agent.id),
 		[v2Agents],
@@ -481,6 +519,23 @@ export function NewWorkspaceScreen({
 		EFFORT_STORAGE_KEY,
 		effortSupport ? selectedPresetId : null,
 	);
+	// Codex's top two efforts only exist on its GPT-5.6 models and cursor-agent
+	// has a ladder for only some models, so the offered list follows the model
+	// picker and the control disappears when there is nothing to offer. A
+	// remembered effort the current model rejects stays stored but shows (and
+	// launches) as the agent default.
+	const effortOptions = useMemo(
+		() =>
+			selectedPresetId
+				? getAgentEfforts(selectedPresetId, selectedModel ?? undefined)
+				: [],
+		[selectedPresetId, selectedModel],
+	);
+	const effortForLaunch = effortOptions.some(
+		(option) => option.id === selectedEffort,
+	)
+		? selectedEffort
+		: null;
 	const modeSupport = selectedPresetId
 		? getAgentModeSupport(selectedPresetId)
 		: undefined;
@@ -528,7 +583,7 @@ export function NewWorkspaceScreen({
 		projectId,
 		selectedAgent,
 		modelSupport ? selectedModel : null,
-		effortSupport ? selectedEffort : null,
+		effortForLaunch,
 		modeSupport ? selectedMode : null,
 		uploadAttachments,
 		promptContext,
@@ -536,17 +591,29 @@ export function NewWorkspaceScreen({
 
 	const { otherHosts } = useWorkspaceHostOptions();
 	const submitBlocker = useMemo<string | null>(() => {
-		if (!projectId && !draft.isSession) return "Select a project";
 		const selectedHostId = draft.hostId ?? machineId;
-		// A cloud workspace is provisioned on submit, so there is no host whose
-		// readiness could block it.
+		// A cloud workspace is provisioned by the API from the one cloud repo:
+		// no host whose readiness could block it, and no project either — the
+		// picker is hidden for cloud, so requiring one is unanswerable.
 		if (selectedHostId === CLOUD_HOST_ID) return null;
-		if (!selectedHostId) return "No active host";
+		if (!projectId && !draft.isSession)
+			return t({
+				message: "Select a project",
+			});
+		if (!selectedHostId)
+			return t({
+				message: "No active host",
+			});
 		if (selectedHostId !== machineId) {
 			const remote = otherHosts.find((host) => host.id === selectedHostId);
-			if (!remote?.isOnline) return "Host is offline";
+			if (!remote?.isOnline)
+				return t({
+					message: "Host is offline",
+				});
 		} else if (!activeHostUrl) {
-			return "Host service is not running";
+			return t({
+				message: "Host service is not running",
+			});
 		}
 		return null;
 	}, [
@@ -556,6 +623,7 @@ export function NewWorkspaceScreen({
 		machineId,
 		activeHostUrl,
 		otherHosts,
+		t,
 	]);
 
 	const handleGoToSetup = useCallback(() => {
@@ -593,7 +661,7 @@ export function NewWorkspaceScreen({
 		if (submitBlocker) {
 			if ((draft.hostId ?? machineId) === machineId && !activeHostUrl) {
 				showHostServiceUnavailableToast(hostService, {
-					action: "create the workspace",
+					action: "createWorkspace",
 				});
 			} else {
 				toast.error(submitBlocker);
@@ -638,7 +706,7 @@ export function NewWorkspaceScreen({
 						className="pointer-events-none absolute inset-0 z-50 flex items-center justify-center bg-background/70"
 					>
 						<span className="rounded-lg border border-border bg-popover px-3 py-1.5 text-sm text-popover-foreground shadow-md">
-							Drop to attach
+							<Trans>Drop to attach</Trans>
 						</span>
 					</motion.div>
 				)}
@@ -653,7 +721,9 @@ export function NewWorkspaceScreen({
 								type="button"
 								variant="ghost"
 								size="icon"
-								aria-label="Update naming instructions"
+								aria-label={t({
+									message: "Update naming instructions",
+								})}
 								className="size-7 text-muted-foreground"
 								onClick={handleGoToNamingInstructions}
 							>
@@ -661,19 +731,25 @@ export function NewWorkspaceScreen({
 							</Button>
 						</TooltipTrigger>
 						<TooltipContent>
-							Update naming instructions for {selectedProject.name}
+							<Trans>
+								Update naming instructions for {selectedProject.name}
+							</Trans>
 						</TooltipContent>
 					</Tooltip>
 				)}
 				<PromptHistoryCommand
 					onSelect={applyPrompt}
-					tooltipLabel="Previous prompts"
+					tooltipLabel={t({
+						message: "Previous prompts",
+					})}
 				>
 					<Button
 						type="button"
 						variant="ghost"
 						size="icon"
-						aria-label="Previous prompts"
+						aria-label={t({
+							message: "Previous prompts",
+						})}
 						className="size-7 text-muted-foreground"
 					>
 						<HistoryIcon className="size-4" />
@@ -683,7 +759,7 @@ export function NewWorkspaceScreen({
 			<div className="flex flex-1 flex-col items-center justify-center gap-8">
 				<SupersetIcon className="h-10 w-auto text-muted-foreground/70" />
 				<h1 className="text-center text-3xl font-medium text-foreground/90">
-					What should we build next?
+					<Trans>What should we build next?</Trans>
 				</h1>
 				<GitHubStarPill surface="new_workspace" reserveSpace />
 			</div>
@@ -742,6 +818,7 @@ export function NewWorkspaceScreen({
 						globalDrop
 						maxFiles={5}
 						maxFileSize={10 * 1024 * 1024}
+						onError={(error) => toast.error(error.message)}
 						className="[&>[data-slot=input-group]]:rounded-[13px] [&>[data-slot=input-group]]:border-[0.5px] [&>[data-slot=input-group]]:shadow-none [&>[data-slot=input-group]]:bg-foreground/[0.02]"
 					>
 						{(draft.linkedPR ||
@@ -820,13 +897,17 @@ export function NewWorkspaceScreen({
 								<AgentSelect<WorkspaceCreateAgent>
 									agents={v2Agents}
 									value={selectedAgent}
-									placeholder="No agent"
+									placeholder={t({
+										message: "No agent",
+									})}
 									onValueChange={setSelectedAgent}
 									onBeforeConfigureAgents={closeModal}
 									triggerClassName={`${PILL_BUTTON_CLASS} px-1.5 gap-1 text-foreground w-auto max-w-[160px]`}
 									iconClassName="size-3 object-contain"
 									allowNone
-									noneLabel="No agent"
+									noneLabel={t({
+										message: "No agent",
+									})}
 									noneValue="none"
 								/>
 								{modelSupport && (
@@ -834,16 +915,20 @@ export function NewWorkspaceScreen({
 										models={modelSupport.models}
 										value={selectedModel}
 										onValueChange={setSelectedModel}
-										defaultLabel="Default model"
+										defaultLabel={t({
+											message: "Default model",
+										})}
 										triggerClassName={`${PILL_BUTTON_CLASS} px-1.5 gap-1 text-foreground w-auto max-w-[160px]`}
 									/>
 								)}
-								{effortSupport && (
+								{effortSupport && effortOptions.length > 0 && (
 									<AgentModelSelect
-										models={effortSupport.efforts}
+										models={effortOptions}
 										value={selectedEffort}
 										onValueChange={setSelectedEffort}
-										defaultLabel="Default effort"
+										defaultLabel={t({
+											message: "Default effort",
+										})}
 										triggerClassName={`${PILL_BUTTON_CLASS} px-1.5 gap-1 text-foreground w-auto max-w-[160px]`}
 									/>
 								)}
@@ -852,7 +937,9 @@ export function NewWorkspaceScreen({
 										models={modeSupport.modes}
 										value={selectedMode}
 										onValueChange={setSelectedMode}
-										defaultLabel="Direct mode"
+										defaultLabel={t({
+											message: "Direct mode",
+										})}
 										triggerClassName={`${PILL_BUTTON_CLASS} px-1.5 gap-1 text-foreground w-auto max-w-[160px]`}
 									/>
 								)}
@@ -860,10 +947,14 @@ export function NewWorkspaceScreen({
 							<div className="flex items-center gap-2">
 								<IssueLinkCommand
 									onSelect={addLinkedIssue}
-									tooltipLabel="Link issue"
+									tooltipLabel={t({
+										message: "Link issue",
+									})}
 								>
 									<PromptInputButton
-										aria-label="Link issue"
+										aria-label={t({
+											message: "Link issue",
+										})}
 										className={`${PILL_BUTTON_CLASS} w-[22px]`}
 									>
 										<SiLinear className="size-3.5" />
@@ -880,10 +971,14 @@ export function NewWorkspaceScreen({
 									}
 									projectId={projectId}
 									hostId={draft.hostId}
-									tooltipLabel="Link GitHub issue"
+									tooltipLabel={t({
+										message: "Link GitHub issue",
+									})}
 								>
 									<PromptInputButton
-										aria-label="Link GitHub issue"
+										aria-label={t({
+											message: "Link GitHub issue",
+										})}
 										className={`${PILL_BUTTON_CLASS} w-[22px]`}
 									>
 										<GoIssueOpened className="size-3.5" />
@@ -893,10 +988,14 @@ export function NewWorkspaceScreen({
 									onSelect={setLinkedPR}
 									projectId={projectId}
 									hostId={draft.hostId}
-									tooltipLabel="Link pull request"
+									tooltipLabel={t({
+										message: "Link pull request",
+									})}
 								>
 									<PromptInputButton
-										aria-label="Link pull request"
+										aria-label={t({
+											message: "Link pull request",
+										})}
 										className={`${PILL_BUTTON_CLASS} w-[22px]`}
 									>
 										<LuGitPullRequest className="size-3.5" />
@@ -905,14 +1004,18 @@ export function NewWorkspaceScreen({
 								<Tooltip>
 									<TooltipTrigger asChild>
 										<PromptInputButton
-											aria-label="Add attachment"
+											aria-label={t({
+												message: "Add attachment",
+											})}
 											className={`${PILL_BUTTON_CLASS} w-[22px]`}
 											onClick={() => attachments.openFileDialog()}
 										>
 											<PaperclipIcon className="size-3.5" />
 										</PromptInputButton>
 									</TooltipTrigger>
-									<TooltipContent side="bottom">Add attachment</TooltipContent>
+									<TooltipContent side="bottom">
+										<Trans>Add attachment</Trans>
+									</TooltipContent>
 								</Tooltip>
 								<PromptInputSubmit
 									className="size-[22px] rounded-full border border-transparent bg-foreground/10 shadow-none p-[5px] hover:bg-foreground/20"
@@ -940,23 +1043,34 @@ export function NewWorkspaceScreen({
 									updateDraft({ hostId: next });
 								}}
 							/>
-							<ProjectPickerPill
-								selectedProject={selectedProject}
-								projects={projects}
-								isSessionSelected={draft.isSession}
-								onSelectProject={(selectedProjectId) => {
-									if (selectedProjectId === null) {
-										selectSession();
-										return;
+							{draft.hostId !== CLOUD_HOST_ID && (
+								<ProjectPickerPill
+									selectedProject={selectedProject}
+									projects={projects}
+									isSessionSelected={draft.isSession}
+									onSelectProject={(selectedProjectId) => {
+										if (selectedProjectId === null) {
+											selectSession();
+											return;
+										}
+										setLastProjectId(selectedProjectId);
+										selectProject(selectedProjectId);
+									}}
+								/>
+							)}
+							{draft.hostId === CLOUD_HOST_ID && (
+								<EnvironmentPickerPill
+									selectedEnvironment={selectedEnvironment}
+									environments={environmentOptions}
+									onSelectEnvironment={(next) =>
+										updateDraft({ environmentId: next })
 									}
-									setLastProjectId(selectedProjectId);
-									selectProject(selectedProjectId);
-								}}
-							/>
+								/>
+							)}
 							{draft.linkedPR ? (
 								<span className="flex items-center gap-1 text-xs text-muted-foreground">
 									<LuGitPullRequest className="size-3 shrink-0" />
-									based off PR #{draft.linkedPR.prNumber}
+									<Trans>based off PR #{draft.linkedPR.prNumber}</Trans>
 								</span>
 							) : draft.isSession ? null : (
 								<CompareBaseBranchPicker {...pickerProps} />
@@ -970,7 +1084,7 @@ export function NewWorkspaceScreen({
 								className="h-6 px-2 text-[11px] text-amber-500 hover:text-amber-500"
 								onClick={handleGoToSetup}
 							>
-								Set up project…
+								<Trans>Set up project…</Trans>
 							</Button>
 						)}
 					</div>

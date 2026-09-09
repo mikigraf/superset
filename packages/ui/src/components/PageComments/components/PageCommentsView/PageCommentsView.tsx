@@ -1,16 +1,16 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useComments } from "../../providers/CommentProvider";
+import { getInitials } from "@superset/shared/names";
 import {
 	FRAME_CHANNEL,
 	type FrameMessage,
 	HOST_CHANNEL,
 	type HostMessageBody,
-	injectCommentRuntime,
-} from "../../utils/commentRuntime";
+} from "@superset/shared/page-comments-runtime";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useComments } from "../../providers/CommentProvider";
 import { CommentBubble, pinClassName } from "./components/CommentBubble";
-import { CommentPopover, initialsOf } from "./components/CommentPopover";
+import { CommentPopover } from "./components/CommentPopover";
 import { PageFrame } from "./components/PageFrame";
 import {
 	PIN_SIZE,
@@ -20,16 +20,30 @@ import {
 } from "./utils/pinLayout";
 
 interface PageCommentsViewProps {
-	html: string;
+	/** The page's own origin, which serves it with the comment runtime injected. */
+	src: string;
 	title: string;
-	serveHtml?: (injectedHtml: string) => Promise<string>;
+	initialScrollY?: number;
+	onScrollYChange?: (y: number) => void;
+	/**
+	 * A press inside the frame. It never bubbles into the host document, so a
+	 * host that focuses on click (a pane) hears about it here instead.
+	 */
+	onFramePointerDown?: () => void;
 }
 
 export function PageCommentsView({
-	html,
+	src,
 	title,
-	serveHtml,
+	initialScrollY,
+	onScrollYChange,
+	onFramePointerDown,
 }: PageCommentsViewProps) {
+	const scrollYRef = useRef(initialScrollY ?? 0);
+	const onScrollYChangeRef = useRef(onScrollYChange);
+	onScrollYChangeRef.current = onScrollYChange;
+	const onFramePointerDownRef = useRef(onFramePointerDown);
+	onFramePointerDownRef.current = onFramePointerDown;
 	const frameRef = useRef<HTMLIFrameElement>(null);
 	const containerRef = useRef<HTMLDivElement>(null);
 	const [container, setContainer] = useState({ width: 0, height: 0 });
@@ -46,6 +60,8 @@ export function PageCommentsView({
 		discardDraft,
 		activeThreadId,
 		setActiveThreadId,
+		panelOpen,
+		setPanelOpen,
 		hoverRect,
 		setHoverRect,
 		rects,
@@ -58,29 +74,11 @@ export function PageCommentsView({
 		deleteThread,
 	} = useComments();
 
-	const injected = useMemo(() => injectCommentRuntime(html), [html]);
-
-	const [servedSrc, setServedSrc] = useState<string | null>(null);
-	useEffect(() => {
-		if (!serveHtml) return;
-		let active = true;
-		setServedSrc(null);
-		serveHtml(injected).then(
-			(url) => {
-				if (active) setServedSrc(url);
-			},
-			() => {
-				if (active) setServedSrc(null);
-			},
-		);
-		return () => {
-			active = false;
-		};
-	}, [injected, serveHtml]);
+	const frameOrigin = useMemo(() => new URL(src).origin, [src]);
 
 	/**
 	 * Escape peels one layer at a time: the draft you are composing, then an
-	 * open thread, then comment mode itself.
+	 * open thread, then the panel, then comment mode itself.
 	 */
 	const dismiss = useCallback(() => {
 		if (submitting) return;
@@ -92,13 +90,19 @@ export function PageCommentsView({
 			setActiveThreadId(null);
 			return;
 		}
+		if (panelOpen) {
+			setPanelOpen(false);
+			return;
+		}
 		if (enabled) toggleEnabled();
 	}, [
 		activeThreadId,
 		discardDraft,
 		draft,
 		enabled,
+		panelOpen,
 		setActiveThreadId,
+		setPanelOpen,
 		submitting,
 		toggleEnabled,
 	]);
@@ -111,35 +115,59 @@ export function PageCommentsView({
 		return () => window.removeEventListener("keydown", onKeyDown);
 	}, [dismiss]);
 
-	const send = useCallback((message: HostMessageBody) => {
-		frameRef.current?.contentWindow?.postMessage(
-			{ channel: HOST_CHANNEL, ...message },
-			"*",
-		);
-	}, []);
+	const send = useCallback(
+		(message: HostMessageBody) => {
+			frameRef.current?.contentWindow?.postMessage(
+				{ channel: HOST_CHANNEL, ...message },
+				frameOrigin,
+			);
+		},
+		[frameOrigin],
+	);
 
+	const popoverThread = panelOpen
+		? null
+		: threads.find((thread) => thread.id === activeThreadId);
+	const popoverOpen = Boolean(draft || popoverThread);
 	useEffect(() => {
 		const element = containerRef.current;
 		if (!element) return;
-		const observer = new ResizeObserver(() => {
-			setContainer({
-				width: element.clientWidth,
-				height: element.clientHeight,
-			});
-		});
+		const measure = () => {
+			const width = element.clientWidth;
+			const height = element.clientHeight;
+			setContainer((previous) =>
+				previous.width === width && previous.height === height
+					? previous
+					: { width, height },
+			);
+		};
+		measure();
+		if (!popoverOpen) return;
+		const observer = new ResizeObserver(measure);
 		observer.observe(element);
 		return () => observer.disconnect();
-	}, []);
+	}, [popoverOpen]);
 
 	useEffect(() => {
 		const onMessage = (event: MessageEvent) => {
+			if (event.origin !== frameOrigin) return;
 			if (event.source !== frameRef.current?.contentWindow) return;
 			const data = event.data as FrameMessage | undefined;
 			if (!data || data.channel !== FRAME_CHANNEL) return;
 
-			if (data.type === "ready") setFrameEpoch((epoch) => epoch + 1);
+			if (data.type === "ready") {
+				setFrameEpoch((epoch) => epoch + 1);
+				if (scrollYRef.current > 0) {
+					send({ type: "restore-scroll", y: scrollYRef.current });
+				}
+			}
+			if (data.type === "scroll") {
+				scrollYRef.current = data.y;
+				onScrollYChangeRef.current?.(data.y);
+			}
 			if (data.type === "hover") setHoverRect(data.rect);
 			if (data.type === "pointer-down") {
+				onFramePointerDownRef.current?.();
 				notifyFramePointerDown();
 				if (!submitting) {
 					discardDraft();
@@ -158,8 +186,10 @@ export function PageCommentsView({
 	}, [
 		discardDraft,
 		dismiss,
+		frameOrigin,
 		notifyFramePointerDown,
 		openDraft,
+		send,
 		setActiveThreadId,
 		setHoverRect,
 		setRects,
@@ -198,20 +228,17 @@ export function PageCommentsView({
 	);
 	const stackIndex = useMemo(() => stackPins(pins), [pins]);
 
-	const activeThread = threads.find((thread) => thread.id === activeThreadId);
-	const activePoint = activeThread ? pinPoints.get(activeThread.id) : null;
+	const activePoint = popoverThread ? pinPoints.get(popoverThread.id) : null;
 	const draftPoint = draft ? pinPointOf(draft.rect, draft.anchor) : null;
 
 	return (
 		<div ref={containerRef} className="relative h-full w-full">
-			{servedSrc || !serveHtml ? (
-				<PageFrame
-					ref={frameRef}
-					{...(serveHtml ? { src: servedSrc as string } : { html: injected })}
-					title={title}
-					onLoad={() => setFrameEpoch((epoch) => epoch + 1)}
-				/>
-			) : null}
+			<PageFrame
+				ref={frameRef}
+				src={src}
+				title={title}
+				onLoad={() => setFrameEpoch((epoch) => epoch + 1)}
+			/>
 
 			<div className="pointer-events-none absolute inset-0 overflow-hidden">
 				{enabled && hoverRect ? (
@@ -235,7 +262,7 @@ export function PageCommentsView({
 						}}
 						className={pinClassName({ resolved: false, active: false })}
 					>
-						{initialsOf(user.name)}
+						{getInitials(user.name) || "?"}
 					</div>
 				) : null}
 
@@ -248,7 +275,7 @@ export function PageCommentsView({
 							key={thread.id}
 							point={point}
 							stackIndex={stackIndex[thread.id] ?? 0}
-							initials={initialsOf(first?.authorName ?? "?")}
+							initials={getInitials(first?.authorName) || "?"}
 							count={thread.comments.length}
 							resolved={thread.resolved}
 							active={thread.id === activeThreadId}
@@ -269,6 +296,7 @@ export function PageCommentsView({
 						point={draftPoint}
 						container={container}
 						thread={null}
+						initialValue={draft.body}
 						onDismiss={discardDraft}
 						onSubmit={(body) =>
 							createThread({
@@ -280,21 +308,21 @@ export function PageCommentsView({
 					/>
 				) : null}
 
-				{activeThread && activePoint ? (
+				{popoverThread && activePoint ? (
 					<CommentPopover
-						key={activeThread.id}
+						key={popoverThread.id}
 						point={activePoint}
 						container={container}
-						thread={activeThread}
+						thread={popoverThread}
 						onDismiss={() => setActiveThreadId(null)}
-						onSubmit={(body) => addReply(activeThread.id, body)}
+						onSubmit={(body) => addReply(popoverThread.id, body)}
 						onEdit={(commentId, body) =>
-							editComment(activeThread.id, commentId, body)
+							editComment(popoverThread.id, commentId, body)
 						}
 						onToggleResolved={() =>
-							setResolved(activeThread.id, !activeThread.resolved)
+							setResolved(popoverThread.id, !popoverThread.resolved)
 						}
-						onDelete={() => deleteThread(activeThread.id)}
+						onDelete={() => deleteThread(popoverThread.id)}
 					/>
 				) : null}
 			</div>

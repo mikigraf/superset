@@ -1,7 +1,4 @@
-import {
-	getPluginByName,
-	type InstalledPlugin,
-} from "@superset/shared/plugins";
+import { Trans, useLingui } from "@lingui/react/macro";
 import { Button } from "@superset/ui/button";
 import {
 	Dialog,
@@ -13,11 +10,12 @@ import {
 import { Switch } from "@superset/ui/switch";
 import { LuTrash2 } from "react-icons/lu";
 import { PluginIcon } from "renderer/routes/_authenticated/_dashboard/plugins/components/PluginIcon";
+import type { CatalogPlugin } from "renderer/routes/_authenticated/_dashboard/plugins/hooks/usePluginCatalog";
 
 interface ManageInstalledDialogProps {
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
-	installed: InstalledPlugin[];
+	installed: CatalogPlugin[];
 	isBusy: boolean;
 	onSetEnabled: (name: string, enabled: boolean) => void;
 	onUninstall: (name: string) => void;
@@ -31,45 +29,49 @@ export function ManageInstalledDialog({
 	onSetEnabled,
 	onUninstall,
 }: ManageInstalledDialogProps) {
+	const { t } = useLingui();
 	return (
 		<Dialog open={open} onOpenChange={onOpenChange}>
 			<DialogContent className="max-w-lg">
 				<DialogHeader>
-					<DialogTitle>Manage plugins</DialogTitle>
+					<DialogTitle>
+						<Trans>Manage plugins</Trans>
+					</DialogTitle>
 					<DialogDescription>
-						Disabling keeps a plugin installed but removes its servers from your
-						agents. Changes take effect in new agent sessions.
+						<Trans>
+							Disabling keeps a plugin installed but removes its servers from
+							your agents. Changes take effect in new agent sessions.
+						</Trans>
 					</DialogDescription>
 				</DialogHeader>
 				{installed.length === 0 ? (
 					<p className="py-4 text-sm text-muted-foreground">
-						Nothing installed yet.
+						<Trans>Nothing installed yet.</Trans>
 					</p>
 				) : (
 					<div className="flex flex-col divide-y divide-border/60">
-						{installed.map((entry) => {
-							const plugin = getPluginByName(entry.name);
-							const isEnabled = entry.enabled !== false;
+						{installed.map((plugin) => {
+							const servers = Object.keys(plugin.mcpServers).join(", ");
 							return (
-								<div key={entry.name} className="flex items-center gap-3 py-3">
-									<PluginIcon pluginName={entry.name} className="size-8" />
+								<div key={plugin.name} className="flex items-center gap-3 py-3">
+									<PluginIcon pluginName={plugin.name} className="size-8" />
 									<div className="min-w-0 flex-1">
 										<div className="text-sm font-medium text-foreground">
-											{plugin?.interface.displayName ?? entry.name}
+											{plugin.interface.displayName}
 										</div>
 										<p className="truncate text-xs text-muted-foreground">
-											v{entry.version}
-											{plugin
-												? ` · ${Object.keys(plugin.mcpServers).join(", ")}`
-												: " · no longer in the catalog"}
+											v{plugin.version}
+											{servers ? ` · ${servers}` : ""}
 										</p>
 									</div>
 									<Switch
-										checked={isEnabled}
+										checked={plugin.enabled}
 										disabled={isBusy}
-										aria-label={`${plugin?.interface.displayName ?? entry.name} enabled`}
+										aria-label={t({
+											message: `${plugin.interface.displayName} enabled`,
+										})}
 										onCheckedChange={(checked) =>
-											onSetEnabled(entry.name, checked)
+											onSetEnabled(plugin.name, checked)
 										}
 									/>
 									<Button
@@ -77,8 +79,10 @@ export function ManageInstalledDialog({
 										size="icon-xs"
 										className="shrink-0 text-muted-foreground hover:text-destructive"
 										disabled={isBusy}
-										aria-label={`Uninstall ${plugin?.interface.displayName ?? entry.name}`}
-										onClick={() => onUninstall(entry.name)}
+										aria-label={t({
+											message: `Uninstall ${plugin.interface.displayName}`,
+										})}
+										onClick={() => onUninstall(plugin.name)}
 									>
 										<LuTrash2 className="size-4" />
 									</Button>

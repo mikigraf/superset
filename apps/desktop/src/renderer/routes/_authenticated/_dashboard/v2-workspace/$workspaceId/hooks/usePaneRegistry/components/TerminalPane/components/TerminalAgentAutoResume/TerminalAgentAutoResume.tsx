@@ -1,16 +1,20 @@
+import { Trans, useLingui } from "@lingui/react/macro";
 import type { RendererContext } from "@superset/panes";
 import { Button } from "@superset/ui/button";
 import { cn } from "@superset/ui/utils";
 import { workspaceTrpc } from "@superset/workspace-client";
 import { History, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTerminalResumeCandidate } from "renderer/hooks/host-service/useTerminalResumeCandidate";
+import { useTerminalResumedSuccessor } from "renderer/hooks/host-service/useTerminalResumedSuccessor";
+import { useWorkspaceEvent } from "renderer/hooks/host-service/useWorkspaceEvent";
 import type { ConnectionState } from "renderer/lib/terminal/terminal-runtime-registry";
 import { terminalRuntimeRegistry } from "renderer/lib/terminal/terminal-runtime-registry";
 import type {
 	PaneViewerData,
 	TerminalPaneData,
 } from "renderer/routes/_authenticated/_dashboard/v2-workspace/$workspaceId/types";
+import { findTerminalPaneLocation } from "renderer/routes/_authenticated/_dashboard/v2-workspace/$workspaceId/utils/focusTerminalPane";
 
 interface TerminalAgentAutoResumeProps {
 	workspaceId: string;
@@ -26,9 +30,14 @@ interface TerminalAgentAutoResumeProps {
  * agent's own SessionEnd (killed daemon, laptop reboot, crashed pty). The
  * host's `terminalAgents.resume` claims the candidate atomically and
  * coalesces concurrent callers, so duplicate mounts, StrictMode re-effects,
- * and second windows all converge on the one resumed session; this component
- * then re-points the pane at it. Only a failed launch surfaces UI — a banner
- * with a manual retry.
+ * and second windows all converge on the one resumed session. Whoever
+ * resumed it — this pane, another window, or the host itself for an
+ * account-switch restart — the host announces the move as a "resumed"
+ * lifecycle event, and this component re-points the pane at the new
+ * terminal. A pane that was not mounted for the event (inactive tab, closed
+ * workspace, another client) asks the host where its session went on
+ * mount instead. Only a failed launch surfaces UI — a banner with a manual
+ * retry.
  */
 export function TerminalAgentAutoResume({
 	workspaceId,
@@ -36,6 +45,7 @@ export function TerminalAgentAutoResume({
 	connectionState,
 	ctx,
 }: TerminalAgentAutoResumeProps) {
+	const { t } = useLingui();
 	const { candidate, invalidate } = useTerminalResumeCandidate(
 		workspaceId,
 		terminalId,
@@ -67,6 +77,51 @@ export function TerminalAgentAutoResume({
 	const { mutateAsync: resumeAsync } =
 		workspaceTrpc.terminalAgents.resume.useMutation();
 
+	const followResumedSession = useCallback(
+		(resumedTerminalId: string, label: string) => {
+			terminalRuntimeRegistry.dispose(terminalId);
+			const state = ctx.store.getState();
+			// Background-session adoption may already have given the new
+			// terminal a pane of its own while this one was unmounted. Beside
+			// this pane it is on screen and wins; in another tab this pane
+			// keeps its place and title and the adopted one closes — the
+			// registry's close hook sees this pane still holds the terminal
+			// and only releases the closing pane's runtime.
+			const existing = findTerminalPaneLocation(state, resumedTerminalId);
+			if (existing?.tabId === ctx.tab.id && existing.paneId !== ctx.pane.id) {
+				state.closePane({ tabId: ctx.tab.id, paneId: ctx.pane.id });
+				return;
+			}
+			state.setPaneData({
+				paneId: ctx.pane.id,
+				data: { terminalId: resumedTerminalId } satisfies TerminalPaneData,
+			});
+			state.setPaneTitleOverride({
+				tabId: ctx.tab.id,
+				paneId: ctx.pane.id,
+				titleOverride: label,
+			});
+			if (existing && existing.paneId !== ctx.pane.id) {
+				state.closePane(existing);
+			}
+		},
+		[ctx, terminalId],
+	);
+
+	useWorkspaceEvent("terminal:lifecycle", workspaceId, (payload) => {
+		if (payload.eventType !== "resumed" || payload.terminalId !== terminalId)
+			return;
+		followResumedSession(payload.resumedTerminalId, payload.label);
+	});
+
+	const successor = useTerminalResumedSuccessor(workspaceId, terminalId, {
+		enabled: connectionState !== "open",
+	});
+	useEffect(() => {
+		if (!successor) return;
+		followResumedSession(successor.terminalId, successor.label);
+	}, [successor, followResumedSession]);
+
 	const shouldResume = Boolean(candidate?.resumeSupported) && !failed;
 	useEffect(() => {
 		if (!shouldResume || !candidateSessionId) return;
@@ -85,17 +140,9 @@ export function TerminalAgentAutoResume({
 					invalidate();
 					return;
 				}
-				const state = ctx.store.getState();
-				state.setPaneData({
-					paneId: ctx.pane.id,
-					data: { terminalId: result.terminalId } satisfies TerminalPaneData,
-				});
-				state.setPaneTitleOverride({
-					tabId: ctx.tab.id,
-					paneId: ctx.pane.id,
-					titleOverride: result.label,
-				});
-				terminalRuntimeRegistry.dispose(terminalId);
+				// The "resumed" event does the same; a second application is a
+				// no-op, and this covers the event racing ahead of the socket.
+				followResumedSession(result.terminalId, result.label);
 			} catch (error) {
 				// The banner only says "Failed to resume" — keep the detail
 				// reachable for support via the console/main.log mirror, which
@@ -120,7 +167,7 @@ export function TerminalAgentAutoResume({
 		invalidate,
 		workspaceId,
 		terminalId,
-		ctx,
+		followResumedSession,
 	]);
 
 	if (!candidate?.resumeSupported || dismissed) return null;
@@ -141,9 +188,11 @@ export function TerminalAgentAutoResume({
 					aria-live="polite"
 					className="whitespace-nowrap text-xs text-muted-foreground"
 				>
-					{failed
-						? `Failed to resume ${candidate.agentLabel}`
-						: `Resuming ${candidate.agentLabel}…`}
+					{failed ? (
+						<Trans>Failed to resume {candidate.agentLabel}</Trans>
+					) : (
+						<Trans>Resuming {candidate.agentLabel}…</Trans>
+					)}
 				</output>
 				{failed && (
 					<>
@@ -155,13 +204,15 @@ export function TerminalAgentAutoResume({
 								attemptedSessionRef.current = null;
 							}}
 						>
-							Retry
+							<Trans>Retry</Trans>
 						</Button>
 						<Button
 							variant="ghost"
 							size="icon"
 							className="size-6"
-							aria-label="Dismiss resume prompt"
+							aria-label={t({
+								message: "Dismiss resume prompt",
+							})}
 							onClick={() => setDismissed(true)}
 						>
 							<X className="size-3.5" />

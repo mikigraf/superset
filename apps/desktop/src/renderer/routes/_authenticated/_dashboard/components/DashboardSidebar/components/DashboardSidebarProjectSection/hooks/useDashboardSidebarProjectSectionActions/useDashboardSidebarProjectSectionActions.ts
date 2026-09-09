@@ -1,15 +1,19 @@
-import { alert } from "@superset/ui/atoms/Alert";
+import { plural } from "@lingui/core/macro";
+import { useLingui } from "@lingui/react/macro";
+import { errorMessage } from "@superset/i18n/errors";
 import { toast } from "@superset/ui/sonner";
-import { useNavigate } from "@tanstack/react-router";
+import { useMatchRoute, useNavigate } from "@tanstack/react-router";
 import { useMemo, useRef, useState } from "react";
 import { useHostProjects } from "renderer/hooks/host-projects/useHostProjects";
 import { useHostUrl } from "renderer/hooks/host-service/useHostTargetUrl";
+import { useOpenNewWorkspace } from "renderer/hooks/useOpenNewWorkspace";
 import { getHostServiceClientByUrl } from "renderer/lib/host-service-client";
 import { electronTrpcClient } from "renderer/lib/trpc-client";
 import { useDashboardSidebarSectionRename } from "renderer/routes/_authenticated/_dashboard/components/DashboardSidebar/components/DashboardSidebarSectionRenameContext";
 import { useDashboardSidebarState } from "renderer/routes/_authenticated/hooks/useDashboardSidebarState";
+import { useIsOrganizationOwner } from "renderer/routes/_authenticated/hooks/useIsOrganizationOwner";
+import { useHostWorkspaces } from "renderer/routes/_authenticated/providers/HostWorkspacesProvider";
 import { useLocalHostService } from "renderer/routes/_authenticated/providers/LocalHostServiceProvider";
-import { useOpenNewWorkspaceModal } from "renderer/stores/new-workspace-modal";
 import { useWorkspaceCreates } from "renderer/stores/workspace-creates";
 import type { DashboardSidebarProject } from "../../../../types";
 import type { ImportableWorktree } from "../../components/ImportWorktreesDialog";
@@ -21,20 +25,24 @@ interface UseDashboardSidebarProjectSectionActionsOptions {
 export function useDashboardSidebarProjectSectionActions({
 	project,
 }: UseDashboardSidebarProjectSectionActionsOptions) {
-	const openModal = useOpenNewWorkspaceModal();
+	const { t } = useLingui();
+	const openNewWorkspace = useOpenNewWorkspace();
 	const navigate = useNavigate();
 	// Renames commit on a host serving the project — host.db owns the name.
 	// Prefer the local host when it serves the project (always reachable);
 	// hostIds order is arbitrary and may lead with an offline remote.
 	const { projects: hostProjects } = useHostProjects();
 	const { machineId } = useLocalHostService();
-	const servingHostId = useMemo(() => {
-		const hostIds =
+	const projectHostIds = useMemo(
+		() =>
 			hostProjects.find((item) => item.projectKey === project.id)?.hostIds ??
-			[];
-		if (machineId && hostIds.includes(machineId)) return machineId;
-		return hostIds[0] ?? null;
-	}, [hostProjects, machineId, project.id]);
+			[],
+		[hostProjects, project.id],
+	);
+	const servingHostId = useMemo(() => {
+		if (machineId && projectHostIds.includes(machineId)) return machineId;
+		return projectHostIds[0] ?? null;
+	}, [projectHostIds, machineId]);
 	// undefined (not null) when no host serves it — null would resolve to
 	// the local host and rename the wrong replica.
 	const servingHostUrl = useHostUrl(servingHostId ?? undefined);
@@ -49,11 +57,31 @@ export function useDashboardSidebarProjectSectionActions({
 	const {
 		createSection,
 		deleteSection,
-		removeProjectFromSidebar,
 		renameSection,
+		setProjectHidden,
 		toggleProjectCollapsed,
 		toggleSectionCollapsed,
 	} = useDashboardSidebarState();
+	const canDeleteProject = useIsOrganizationOwner();
+	const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
+	// Hiding or deleting the project you are inside would leave the view
+	// pointing at a workspace the sidebar no longer shows (or that no longer
+	// exists), so both land on the workspaces list first.
+	const matchRoute = useMatchRoute();
+	const activeWorkspaceMatch = matchRoute({ to: "/v2-workspace/$workspaceId" });
+	const activeWorkspaceId = activeWorkspaceMatch
+		? activeWorkspaceMatch.workspaceId
+		: null;
+	const { workspaces: hostWorkspaces } = useHostWorkspaces();
+	const leaveProjectIfActive = () => {
+		if (!activeWorkspaceId) return;
+		const active = hostWorkspaces.find(
+			(workspace) => workspace.id === activeWorkspaceId,
+		);
+		if (active?.projectId === project.id) {
+			navigate({ to: "/v2-workspaces" });
+		}
+	};
 
 	const [isRenaming, setIsRenaming] = useState(false);
 	const [renameValue, setRenameValue] = useState(project.name);
@@ -73,14 +101,20 @@ export function useDashboardSidebarProjectSectionActions({
 		const trimmed = renameValue.trim();
 		if (!trimmed || trimmed === project.name) return;
 		if (!servingHostUrl) {
-			toast.error("Project's host is unreachable — cannot rename right now");
+			toast.error(
+				t({
+					message: "Project's host is unreachable — cannot rename right now",
+				}),
+			);
 			return;
 		}
 		void getHostServiceClientByUrl(servingHostUrl)
 			.project.update.mutate({ projectId: project.id, name: trimmed })
 			.catch((err) => {
 				toast.error(
-					`Rename failed: ${err instanceof Error ? err.message : String(err)}`,
+					t({
+						message: `Rename failed: ${errorMessage(err)}`,
+					}),
 				);
 			});
 	};
@@ -94,14 +128,20 @@ export function useDashboardSidebarProjectSectionActions({
 				? hostProject.repoPath
 				: undefined;
 		if (!localRepoPath) {
-			toast.error("Project folder is not on this machine");
+			toast.error(
+				t({
+					message: "Project folder is not on this machine",
+				}),
+			);
 			return;
 		}
 		try {
 			await electronTrpcClient.external.openInFinder.mutate(localRepoPath);
 		} catch (error) {
 			toast.error(
-				`Failed to open in Finder: ${error instanceof Error ? error.message : "Unknown error"}`,
+				t({
+					message: `Failed to open in Finder: ${errorMessage(error, "Unknown error")}`,
+				}),
 			);
 		}
 	};
@@ -113,24 +153,30 @@ export function useDashboardSidebarProjectSectionActions({
 		});
 	};
 
-	const confirmRemoveFromSidebar = () => {
-		alert({
-			title: "Remove project from sidebar?",
-			description:
-				"This will remove workspaces from the sidebar and delete all project sections. The workspaces or projects won't be deleted.",
-			actions: [
-				{ label: "Cancel", variant: "outline", onClick: () => {} },
-				{
-					label: "Remove",
-					variant: "destructive",
-					onClick: () => removeProjectFromSidebar(project.id),
+	// Hiding is reversible and local, so no confirmation — an undo on the
+	// toast covers a slip, and the sidebar's hidden-projects row covers later.
+	const hideProject = () => {
+		leaveProjectIfActive();
+		setProjectHidden(project.id, true);
+		toast(
+			t({
+				message: `Hid "${project.name}" from the sidebar`,
+			}),
+			{
+				action: {
+					label: t({
+						message: "Undo",
+					}),
+					onClick: () => setProjectHidden(project.id, false),
 				},
-			],
-		});
+			},
+		);
 	};
 
+	const openDeleteDialog = () => setIsDeleteDialogOpen(true);
+
 	const handleNewWorkspace = () => {
-		openModal(project.id);
+		openNewWorkspace(project.id);
 	};
 
 	// Menu action: list the worktrees git knows about that have no workspace
@@ -139,7 +185,10 @@ export function useDashboardSidebarProjectSectionActions({
 		if (importingWorktreesRef.current) return;
 		if (!servingHostUrl) {
 			toast.error(
-				"Project's host is unreachable — cannot import worktrees right now",
+				t({
+					message:
+						"Project's host is unreachable — cannot import worktrees right now",
+				}),
 			);
 			return;
 		}
@@ -155,13 +204,19 @@ export function useDashboardSidebarProjectSectionActions({
 					worktree.hasWorkspace === false && worktree.isMainWorktree === false,
 			);
 			if (untracked.length === 0) {
-				toast.info("All of this project's worktrees are already tracked");
+				toast.info(
+					t({
+						message: "All of this project's worktrees are already tracked",
+					}),
+				);
 				return;
 			}
 			setImportableWorktrees(untracked);
 		} catch (error) {
 			toast.error(
-				`Failed to list worktrees: ${error instanceof Error ? error.message : String(error)}`,
+				t({
+					message: `Failed to list worktrees: ${errorMessage(error)}`,
+				}),
 			);
 		}
 	};
@@ -177,7 +232,10 @@ export function useDashboardSidebarProjectSectionActions({
 		if (importingWorktreesRef.current || !untracked) return;
 		if (!servingHostId) {
 			toast.error(
-				"Project's host is unreachable — cannot import worktrees right now",
+				t({
+					message:
+						"Project's host is unreachable — cannot import worktrees right now",
+				}),
 			);
 			return;
 		}
@@ -205,13 +263,18 @@ export function useDashboardSidebarProjectSectionActions({
 			const imported = outcomes.length - errors.length;
 			if (errors.length > 0) {
 				toast.error(
-					`Imported ${imported} of ${untracked.length} worktrees: ${errors[0]}`,
+					t({
+						message: `Imported ${imported} of ${untracked.length} worktrees: ${errors[0]}`,
+					}),
 				);
 			} else {
 				toast.success(
-					imported === 1
-						? "Imported 1 worktree as a workspace"
-						: `Imported ${imported} worktrees as workspaces`,
+					t({
+						message: plural(imported, {
+							one: "Imported # worktree as a workspace",
+							other: "Imported # worktrees as workspaces",
+						}),
+					}),
 				);
 			}
 			setImportableWorktrees(null);
@@ -230,11 +293,17 @@ export function useDashboardSidebarProjectSectionActions({
 	};
 
 	return {
+		canDeleteProject,
 		cancelRename,
 		confirmImportWorktrees,
-		confirmRemoveFromSidebar,
 		deleteSection,
 		handleImportWorktrees,
+		hideProject,
+		isDeleteDialogOpen,
+		leaveProjectIfActive,
+		openDeleteDialog,
+		projectHostIds,
+		setIsDeleteDialogOpen,
 		handleNewSection,
 		handleNewWorkspace,
 		handleOpenInFinder,

@@ -1,14 +1,21 @@
+import { plural } from "@lingui/core/macro";
+import { Trans, useLingui } from "@lingui/react/macro";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@superset/ui/tooltip";
 import { cn } from "@superset/ui/utils";
+import { useNavigate } from "@tanstack/react-router";
+import { memo } from "react";
 import { CgLaptop } from "react-icons/cg";
+import { LuLaptop, LuMonitor } from "react-icons/lu";
 import { WorkspaceNameMarquee } from "renderer/components/WorkspaceNameMarquee";
 import { useFocusVisible } from "renderer/hooks/useFocusVisible";
+import { navigateToV2Workspace } from "renderer/routes/_authenticated/_dashboard/utils/workspace-navigation";
 import { V2WorkspaceContextMenu } from "renderer/routes/_authenticated/_dashboard/v2-workspaces/components/V2WorkspaceContextMenu";
+import { WorkspaceStateGlyph } from "renderer/routes/_authenticated/_dashboard/v2-workspaces/components/WorkspaceStateGlyph";
 import type { AccessibleV2Workspace } from "renderer/routes/_authenticated/_dashboard/v2-workspaces/hooks/useAccessibleV2Workspaces";
 import { workspaceActivityAt } from "renderer/routes/_authenticated/_dashboard/v2-workspaces/utils/sortWorkspaces";
 import { PRIcon } from "renderer/screens/main/components/PRIcon/PRIcon";
 import { getRelativeTime } from "renderer/screens/main/components/WorkspacesListView/utils";
-import { WorkspaceStateGlyph } from "./components/WorkspaceStateGlyph";
+import { usePullRequestPaneIntent } from "renderer/stores/pull-request-pane-intent";
 
 interface V2WorkspaceRowProps {
 	workspace: AccessibleV2Workspace;
@@ -21,11 +28,23 @@ function formatCount(count: number): string {
 	return `${(count / 1000).toFixed(1).replace(/\.0$/, "")}k`;
 }
 
-export function V2WorkspaceRow({
+// Memoized: filter/sort changes re-render the whole list, and at hundreds of
+// rows (each carrying a context menu, marquee, and tooltips) that costs
+// hundreds of ms per menu-checkbox toggle. Workspace object identities are
+// stable across those changes, so unchanged rows must skip.
+export const V2WorkspaceRow = memo(function V2WorkspaceRow({
 	workspace,
 	isCurrentRoute,
 }: V2WorkspaceRowProps) {
+	const { t } = useLingui();
+	const navigate = useNavigate();
 	const isMainWorkspace = workspace.type === "main";
+	const DeviceIcon =
+		workspace.hostType === "local-device" ? LuLaptop : LuMonitor;
+	// The local device is the one running this app — it can't be offline from
+	// its own point of view, whatever presence says.
+	const isDeviceOffline =
+		!workspace.hostIsOnline && workspace.hostType !== "local-device";
 	// Drives the name's hover-reveal for keyboard users: the row, not the
 	// name span, is what's actually tabbable.
 	const {
@@ -35,7 +54,7 @@ export function V2WorkspaceRow({
 	} = useFocusVisible();
 
 	const creatorLabel = workspace.isCreatedByCurrentUser
-		? "you"
+		? t({ message: "you" })
 		: workspace.createdByName;
 
 	// The visible age tracks activity (matches the default sort); creation
@@ -43,10 +62,19 @@ export function V2WorkspaceRow({
 	const timeLabel = getRelativeTime(workspaceActivityAt(workspace), {
 		format: "compact",
 	});
+	const createdAtLabel = workspace.createdAt.toLocaleString();
 	const timeTitle = [
-		`Created ${workspace.createdAt.toLocaleString()}${creatorLabel ? ` by ${creatorLabel}` : ""}`,
+		creatorLabel
+			? t({
+					message: `Created ${createdAtLabel} by ${creatorLabel}`,
+				})
+			: t({
+					message: `Created ${createdAtLabel}`,
+				}),
 		workspace.lastAgentEventAt
-			? `Last agent activity ${new Date(workspace.lastAgentEventAt).toLocaleString()}`
+			? t({
+					message: `Last agent activity ${new Date(workspace.lastAgentEventAt).toLocaleString()}`,
+				})
 			: null,
 	]
 		.filter(Boolean)
@@ -57,13 +85,24 @@ export function V2WorkspaceRow({
 	// still one hover away instead of gone outright.
 	const rowTitle = [
 		workspace.pr
-			? `PR #${workspace.pr.prNumber} (${workspace.pr.state})`
+			? t({
+					message: `PR #${workspace.pr.prNumber} (${workspace.pr.state})`,
+				})
 			: null,
 		workspace.type !== "session" &&
 		workspace.branch.toLowerCase() !== workspace.name.toLowerCase()
-			? `Branch: ${workspace.branch}`
+			? t({
+					message: `Branch: ${workspace.branch}`,
+				})
 			: null,
-		`Project: ${workspace.projectName ?? "none (session)"}`,
+		t({
+			message: `Project: ${
+				workspace.projectName ??
+				t({
+					message: "none (session)",
+				})
+			}`,
+		}),
 	]
 		.filter(Boolean)
 		.join("\n");
@@ -113,11 +152,15 @@ export function V2WorkspaceRow({
 								<span title="">
 									<CgLaptop
 										className="size-3.5 shrink-0 text-muted-foreground"
-										aria-label="Main workspace"
+										aria-label={t({
+											message: "Main workspace",
+										})}
 									/>
 								</span>
 							</TooltipTrigger>
-							<TooltipContent side="top">Main workspace</TooltipContent>
+							<TooltipContent side="top">
+								<Trans>Main workspace</Trans>
+							</TooltipContent>
 						</Tooltip>
 					) : null}
 
@@ -134,25 +177,38 @@ export function V2WorkspaceRow({
 					/>
 
 					{workspace.pr ? (
-						<a
-							href={workspace.pr.url}
-							target="_blank"
-							rel="noreferrer"
-							onClick={(event) => event.stopPropagation()}
-							title=""
-							aria-label={`Pull request #${workspace.pr.prNumber}, ${workspace.pr.state}`}
+						<button
+							type="button"
+							onClick={(event) => {
+								event.stopPropagation();
+								if (!workspace.pr) return;
+								// Opens the PR pane inside the workspace instead of GitHub.
+								usePullRequestPaneIntent.getState().request({
+									workspaceId: workspace.id,
+									prNumber: workspace.pr.prNumber,
+								});
+								void navigateToV2Workspace(workspace.id, navigate);
+							}}
+							aria-label={t({
+								message: `Pull request #${workspace.pr.prNumber}, ${workspace.pr.state}`,
+							})}
 							className="shrink-0"
 						>
 							<PRIcon state={workspace.pr.state} className="size-3.5" />
-						</a>
+						</button>
 					) : null}
 
 					{workspace.diffStats &&
 					(workspace.diffStats.additions > 0 ||
 						workspace.diffStats.deletions > 0) ? (
 						<span
-							className="flex shrink-0 items-center gap-1.5 font-mono text-[11px] tabular-nums leading-none"
-							title={`${workspace.diffStats.fileCount} changed ${workspace.diffStats.fileCount === 1 ? "file" : "files"}`}
+							className="flex shrink-0 items-center gap-1.5 font-mono text-[11px] tabular-nums leading-none @max-lg:hidden"
+							title={t({
+								message: plural(workspace.diffStats.fileCount, {
+									one: "# changed file",
+									other: "# changed files",
+								}),
+							})}
 						>
 							<span className="text-emerald-600/80 dark:text-emerald-400/70">
 								+{formatCount(workspace.diffStats.additions)}
@@ -164,6 +220,34 @@ export function V2WorkspaceRow({
 					) : null}
 
 					<span
+						className={cn(
+							"flex max-w-36 shrink-0 items-center gap-1.5 text-xs text-muted-foreground",
+							isDeviceOffline && "text-muted-foreground/60",
+						)}
+						title={workspace.hostName}
+					>
+						<DeviceIcon className="size-3 shrink-0" />
+						{/* Narrow panes keep the glyph; sr-only (not hidden) so screen
+						    readers still hear the device name when the text is gone. */}
+						<span className="min-w-0 truncate @max-2xl:sr-only">
+							{workspace.hostName}
+						</span>
+						{isDeviceOffline ? (
+							<>
+								<span
+									aria-hidden
+									className="inline-block size-1.5 shrink-0 rounded-full bg-muted-foreground/40"
+								/>
+								{/* The dot is the only visual offline cue; screen readers
+								    need the word. */}
+								<span className="sr-only">
+									<Trans>Offline</Trans>
+								</span>
+							</>
+						) : null}
+					</span>
+
+					<span
 						className="shrink-0 whitespace-nowrap text-xs tabular-nums text-muted-foreground"
 						title={timeTitle}
 					>
@@ -173,4 +257,4 @@ export function V2WorkspaceRow({
 			)}
 		</V2WorkspaceContextMenu>
 	);
-}
+});

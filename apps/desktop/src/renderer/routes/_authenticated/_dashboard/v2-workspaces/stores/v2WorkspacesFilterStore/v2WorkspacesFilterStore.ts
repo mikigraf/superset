@@ -1,4 +1,7 @@
+import type { MessageDescriptor } from "@lingui/core";
+import { msg } from "@lingui/core/macro";
 import { create } from "zustand";
+import { persist } from "zustand/middleware";
 
 export const DEVICE_FILTER_THIS_DEVICE = "this-device";
 export const DEVICE_FILTER_ALL_DEVICES = "all-devices";
@@ -33,13 +36,21 @@ export type V2WorkspacesAgentStatusFilter =
 /** Shared by the Agent filter dropdown and the list rows' Agent cell. */
 export const V2_WORKSPACES_AGENT_STATUS_LABELS: Record<
 	V2WorkspacesAgentStatusFilter,
-	string
+	MessageDescriptor
 > = {
-	idle: "Idle",
-	working: "Working",
-	permission: "Needs permission",
-	review: "Ready for review",
-	failed: "Failed",
+	idle: msg({ message: "Idle" }),
+	working: msg({
+		message: "Working",
+	}),
+	permission: msg({
+		message: "Needs permission",
+	}),
+	review: msg({
+		message: "Ready for review",
+	}),
+	failed: msg({
+		message: "Failed",
+	}),
 };
 
 export const V2_WORKSPACES_PIN_FILTERS = ["all", "pinned", "unpinned"] as const;
@@ -47,11 +58,17 @@ export type V2WorkspacesPinFilter = (typeof V2_WORKSPACES_PIN_FILTERS)[number];
 
 export const V2_WORKSPACES_PIN_FILTER_LABELS: Record<
 	V2WorkspacesPinFilter,
-	string
+	MessageDescriptor
 > = {
-	all: "All workspaces",
-	pinned: "Pinned",
-	unpinned: "Unpinned",
+	all: msg({
+		message: "All workspaces",
+	}),
+	pinned: msg({
+		message: "Shown",
+	}),
+	unpinned: msg({
+		message: "Hidden",
+	}),
 };
 
 export type V2WorkspacesViewMode = "list" | "board";
@@ -64,11 +81,20 @@ export const V2_WORKSPACES_SORT_MODES = [
 ] as const;
 export type V2WorkspacesSortMode = (typeof V2_WORKSPACES_SORT_MODES)[number];
 
-export const V2_WORKSPACES_SORT_LABELS: Record<V2WorkspacesSortMode, string> = {
-	activity: "Last activity",
-	created: "Created",
-	churn: "Diff size",
-	name: "Name",
+export const V2_WORKSPACES_SORT_LABELS: Record<
+	V2WorkspacesSortMode,
+	MessageDescriptor
+> = {
+	activity: msg({
+		message: "Last activity",
+	}),
+	created: msg({
+		message: "Created",
+	}),
+	churn: msg({
+		message: "Diff size",
+	}),
+	name: msg({ message: "Name" }),
 };
 
 export const V2_WORKSPACES_ARCHIVED_WINDOWS = [
@@ -101,7 +127,9 @@ interface V2WorkspacesFilterState {
 	prStateFilters: V2WorkspacesPrStateFilter[];
 	/** Empty = any agent status. */
 	agentStatusFilters: V2WorkspacesAgentStatusFilter[];
-	/** Sidebar visibility: pinned, unpinned, or both ("all"). */
+	/** Creator user ids; empty = any creator. */
+	creatorFilters: string[];
+	/** Sidebar visibility: shown, hidden, or both ("all"). */
 	pinFilter: V2WorkspacesPinFilter;
 	viewMode: V2WorkspacesViewMode;
 	/** Row order inside status groups (both views). */
@@ -117,6 +145,7 @@ interface V2WorkspacesFilterState {
 	setAgentStatusFilters: (
 		agentStatusFilters: V2WorkspacesAgentStatusFilter[],
 	) => void;
+	setCreatorFilters: (creatorFilters: string[]) => void;
 	setPinFilter: (pinFilter: V2WorkspacesPinFilter) => void;
 	setViewMode: (viewMode: V2WorkspacesViewMode) => void;
 	setSortMode: (sortMode: V2WorkspacesSortMode) => void;
@@ -127,42 +156,55 @@ interface V2WorkspacesFilterState {
 }
 
 export const useV2WorkspacesFilterStore = create<V2WorkspacesFilterState>()(
-	(set) => ({
-		searchQuery: "",
-		deviceFilter: DEVICE_FILTER_THIS_DEVICE,
-		projectFilters: [],
-		prStateFilters: [],
-		agentStatusFilters: [],
-		pinFilter: "all",
-		viewMode: "board",
-		sortMode: "activity",
-		archivedWindow: "none",
-		hiddenLanes: [],
-		setSearchQuery: (searchQuery) => set({ searchQuery }),
-		setDeviceFilter: (deviceFilter) => set({ deviceFilter }),
-		setProjectFilters: (projectFilters) => set({ projectFilters }),
-		setPrStateFilters: (prStateFilters) => set({ prStateFilters }),
-		setAgentStatusFilters: (agentStatusFilters) => set({ agentStatusFilters }),
-		setPinFilter: (pinFilter) => set({ pinFilter }),
-		setViewMode: (viewMode) => set({ viewMode }),
-		setSortMode: (sortMode) => set({ sortMode }),
-		setArchivedWindow: (archivedWindow) => set({ archivedWindow }),
-		toggleLane: (lane) =>
-			set((state) => ({
-				hiddenLanes: state.hiddenLanes.includes(lane)
-					? state.hiddenLanes.filter((hidden) => hidden !== lane)
-					: [...state.hiddenLanes, lane],
-			})),
-		reset: () =>
-			set({
-				searchQuery: "",
-				deviceFilter: DEVICE_FILTER_THIS_DEVICE,
-				projectFilters: [],
-				prStateFilters: [],
-				agentStatusFilters: [],
-				pinFilter: "all",
-				archivedWindow: "none",
-				hiddenLanes: [],
-			}),
-	}),
+	persist(
+		(set) => ({
+			searchQuery: "",
+			deviceFilter: DEVICE_FILTER_THIS_DEVICE,
+			projectFilters: [],
+			prStateFilters: [],
+			agentStatusFilters: [],
+			creatorFilters: [],
+			pinFilter: "all",
+			viewMode: "board",
+			sortMode: "activity",
+			archivedWindow: "none",
+			hiddenLanes: [],
+			setSearchQuery: (searchQuery) => set({ searchQuery }),
+			setDeviceFilter: (deviceFilter) => set({ deviceFilter }),
+			setProjectFilters: (projectFilters) => set({ projectFilters }),
+			setPrStateFilters: (prStateFilters) => set({ prStateFilters }),
+			setAgentStatusFilters: (agentStatusFilters) =>
+				set({ agentStatusFilters }),
+			setCreatorFilters: (creatorFilters) => set({ creatorFilters }),
+			setPinFilter: (pinFilter) => set({ pinFilter }),
+			setViewMode: (viewMode) => set({ viewMode }),
+			setSortMode: (sortMode) => set({ sortMode }),
+			setArchivedWindow: (archivedWindow) => set({ archivedWindow }),
+			toggleLane: (lane) =>
+				set((state) => ({
+					hiddenLanes: state.hiddenLanes.includes(lane)
+						? state.hiddenLanes.filter((hidden) => hidden !== lane)
+						: [...state.hiddenLanes, lane],
+				})),
+			reset: () =>
+				set({
+					searchQuery: "",
+					deviceFilter: DEVICE_FILTER_THIS_DEVICE,
+					projectFilters: [],
+					prStateFilters: [],
+					agentStatusFilters: [],
+					creatorFilters: [],
+					pinFilter: "all",
+					archivedWindow: "none",
+					hiddenLanes: [],
+				}),
+		}),
+		{
+			name: "v2-workspaces-view",
+			// Fixed-size singleton: only the list/board choice survives reloads.
+			// Filters and search stay per-visit (a `?view=` deep link still wins
+			// — the page hydrates URL params over the rehydrated value on mount).
+			partialize: (state) => ({ viewMode: state.viewMode }),
+		},
+	),
 );

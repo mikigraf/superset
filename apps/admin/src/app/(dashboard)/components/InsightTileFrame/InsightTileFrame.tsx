@@ -1,5 +1,6 @@
 "use client";
 
+import { useLingui } from "@lingui/react/macro";
 import { Button } from "@superset/ui/button";
 import {
 	Card,
@@ -25,6 +26,8 @@ interface InsightTileFrameProps {
 	onRefresh?: () => void;
 	isRefreshing?: boolean;
 	href?: string;
+	// Stretch to the parent's height (a grid cell) and let the body scroll.
+	fill?: boolean;
 	children: ReactNode;
 }
 
@@ -35,17 +38,20 @@ export function InsightTileFrame({
 	isLoading,
 	error,
 	empty,
-	emptyLabel = "No data",
+	emptyLabel,
 	headerAction,
 	onRefresh,
 	isRefreshing,
 	href,
+	fill,
 	children,
 }: InsightTileFrameProps) {
+	const { t } = useLingui();
+
 	return (
-		<Card>
+		<Card className={cn(fill && "flex h-full flex-col")}>
 			<CardHeader>
-				<div className="flex items-center justify-between gap-2">
+				<div className="flex min-w-0 items-center justify-between gap-2">
 					{href ? (
 						<a
 							href={href}
@@ -68,7 +74,7 @@ export function InsightTileFrame({
 								className="size-6 p-0"
 								onClick={onRefresh}
 								disabled={isRefreshing}
-								aria-label="Refresh"
+								aria-label={t({ message: "Refresh" })}
 							>
 								<LuRefreshCw
 									className={cn("size-3.5", isRefreshing && "animate-spin")}
@@ -89,7 +95,7 @@ export function InsightTileFrame({
 				</div>
 				{description ? <CardDescription>{description}</CardDescription> : null}
 			</CardHeader>
-			<CardContent>
+			<CardContent className={cn(fill && "min-h-0 flex-1 overflow-auto")}>
 				{isLoading ? (
 					<div className="space-y-3">
 						<Skeleton className="h-6 w-full" />
@@ -104,7 +110,9 @@ export function InsightTileFrame({
 					</div>
 				) : empty ? (
 					<div className="flex h-[200px] items-center justify-center rounded-md border border-dashed">
-						<p className="text-muted-foreground text-sm">{emptyLabel}</p>
+						<p className="text-muted-foreground text-sm">
+							{emptyLabel ?? t({ message: "No data" })}
+						</p>
 					</div>
 				) : (
 					children

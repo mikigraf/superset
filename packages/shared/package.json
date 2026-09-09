@@ -4,13 +4,29 @@
 	"private": true,
 	"type": "module",
 	"exports": {
+		"./usercontent": {
+			"types": "./src/usercontent/index.ts",
+			"default": "./src/usercontent/index.ts"
+		},
+		"./page-comments-runtime": {
+			"types": "./src/page-comments-runtime.ts",
+			"default": "./src/page-comments-runtime.ts"
+		},
 		"./automation-matching": {
 			"types": "./src/automation-matching/index.ts",
 			"default": "./src/automation-matching/index.ts"
 		},
+		"./environment-secrets": {
+			"types": "./src/environment-secrets.ts",
+			"default": "./src/environment-secrets.ts"
+		},
 		"./automation-triggers": {
 			"types": "./src/automation-triggers.ts",
 			"default": "./src/automation-triggers.ts"
+		},
+		"./cloud-agent-launch": {
+			"types": "./src/cloud-agent-launch.ts",
+			"default": "./src/cloud-agent-launch.ts"
 		},
 		"./constants": {
 			"types": "./src/constants.ts",
@@ -40,6 +56,14 @@
 			"types": "./src/sentry.ts",
 			"default": "./src/sentry.ts"
 		},
+		"./sentry-throttle": {
+			"types": "./src/sentry-throttle.ts",
+			"default": "./src/sentry-throttle.ts"
+		},
+		"./sqlite-migrations": {
+			"types": "./src/sqlite-migrations/index.ts",
+			"default": "./src/sqlite-migrations/index.ts"
+		},
 		"./slash-commands": {
 			"types": "./src/slash-commands.ts",
 			"default": "./src/slash-commands.ts"
@@ -51,6 +75,10 @@
 		"./dev-credentials": {
 			"types": "./src/dev-credentials.ts",
 			"default": "./src/dev-credentials.ts"
+		},
+		"./dev-app-profile": {
+			"types": "./src/dev-app-profile.ts",
+			"default": "./src/dev-app-profile.ts"
 		},
 		"./desktop-notices": {
 			"types": "./src/desktop-notices.ts",
@@ -152,6 +180,10 @@
 			"types": "./src/agent-launch-request.ts",
 			"default": "./src/agent-launch-request.ts"
 		},
+		"./workspace-tags": {
+			"types": "./src/workspace-tags.ts",
+			"default": "./src/workspace-tags.ts"
+		},
 		"./workspace-attachments": {
 			"types": "./src/workspace-attachments.ts",
 			"default": "./src/workspace-attachments.ts"
@@ -184,9 +216,9 @@
 			"types": "./src/tunnel-protocol.ts",
 			"default": "./src/tunnel-protocol.ts"
 		},
-		"./tunnel-v2-protocol": {
-			"types": "./src/tunnel-v2-protocol.ts",
-			"default": "./src/tunnel-v2-protocol.ts"
+		"./port-forward-mux": {
+			"types": "./src/port-forward-mux.ts",
+			"default": "./src/port-forward-mux.ts"
 		},
 		"./host-info": {
 			"types": "./src/host-info.ts",
@@ -199,6 +231,10 @@
 		"./host-routing": {
 			"types": "./src/host-routing.ts",
 			"default": "./src/host-routing.ts"
+		},
+		"./install-update-lock": {
+			"types": "./src/install-update-lock.ts",
+			"default": "./src/install-update-lock.ts"
 		},
 		"./host-version": {
 			"types": "./src/host-version.ts",
@@ -227,6 +263,14 @@
 		"./rrule": {
 			"types": "./src/rrule.ts",
 			"default": "./src/rrule.ts"
+		},
+		"./terminal-session-handoff": {
+			"types": "./src/terminal-session-handoff.ts",
+			"default": "./src/terminal-session-handoff.ts"
+		},
+		"./theme-colors": {
+			"types": "./src/themes/types.ts",
+			"default": "./src/themes/types.ts"
 		}
 	},
 	"scripts": {
@@ -236,7 +280,10 @@
 	},
 	"dependencies": {
 		"@date-fns/tz": "1.4.1",
+		"@lingui/core": "6.6.0",
+		"@superset/i18n": "workspace:*",
 		"culori": "4.0.2",
+		"drizzle-orm": "0.45.2",
 		"friendly-words": "1.3.1",
 		"rrule": "2.8.1",
 		"semver": "7.7.4",
@@ -247,7 +294,7 @@
 		"@types/culori": "4.0.1",
 		"@types/friendly-words": "1.2.2",
 		"@types/semver": "7.7.1",
-		"@xterm/xterm": "6.1.0-beta.289",
+		"@xterm/xterm": "6.1.0-beta.302",
 		"bun-types": "1.3.14",
 		"typescript": "6.0.3"
 	}

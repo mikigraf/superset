@@ -1,25 +1,28 @@
+import { useLingui } from "@lingui/react/macro";
 import { toast } from "@superset/ui/sonner";
 import { useNavigate } from "@tanstack/react-router";
 import { useCallback } from "react";
 import { useHostProjects } from "renderer/hooks/host-projects/useHostProjects";
+import { useOpenNewWorkspace } from "renderer/hooks/useOpenNewWorkspace";
 import { useLocalHostService } from "renderer/routes/_authenticated/providers/LocalHostServiceProvider";
-import { useOpenNewWorkspaceModal } from "renderer/stores/new-workspace-modal";
 import { useV2WorkspaceCreateDefaultsStore } from "renderer/stores/v2-workspace-create-defaults";
 import { useWorkspaceCreates } from "renderer/stores/workspace-creates";
 
 /**
- * Creates a v2 workspace immediately, skipping the new-workspace modal.
+ * Creates a v2 workspace immediately, skipping the create surface.
  * `projectIdHint` is the caller's best guess at "current project" (e.g. the
  * open v2 workspace route); when absent it falls back to the last-used
  * project, then the first known project. With no project to infer at all,
- * falls back to opening the modal so the user can add or pick one.
+ * it opens the create surface — the `/new-workspace` route on v2, the dialog
+ * on v1 — so the user can add or pick one.
  */
 export function useQuickCreateWorkspace() {
+	const { t } = useLingui();
 	const navigate = useNavigate();
 	const { machineId } = useLocalHostService();
 	const { projects: hostProjects } = useHostProjects();
 	const { submit } = useWorkspaceCreates();
-	const openNewWorkspaceModal = useOpenNewWorkspaceModal();
+	const openNewWorkspace = useOpenNewWorkspace();
 
 	return useCallback(
 		(projectIdHint?: string | null) => {
@@ -30,7 +33,7 @@ export function useQuickCreateWorkspace() {
 				null;
 
 			if (!projectId || !machineId) {
-				openNewWorkspaceModal();
+				openNewWorkspace();
 				return;
 			}
 
@@ -50,15 +53,21 @@ export function useQuickCreateWorkspace() {
 					if (!outcome.ok) throw new Error(outcome.error);
 				}),
 				{
-					loading: "Creating workspace...",
-					success: "Workspace created",
+					loading: t({
+						message: "Creating workspace...",
+					}),
+					success: t({
+						message: "Workspace created",
+					}),
 					error: (error) =>
 						error instanceof Error
 							? error.message
-							: "Failed to create workspace",
+							: t({
+									message: "Failed to create workspace",
+								}),
 				},
 			);
 		},
-		[hostProjects, machineId, navigate, openNewWorkspaceModal, submit],
+		[hostProjects, machineId, navigate, openNewWorkspace, submit, t],
 	);
 }

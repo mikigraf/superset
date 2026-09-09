@@ -1,3 +1,5 @@
+import type { MessageDescriptor } from "@lingui/core";
+import { i18n } from "@superset/i18n";
 import type { ComponentType } from "react";
 import type { SharedFileDocument } from "../../../../../state/fileDocumentStore";
 
@@ -19,7 +21,9 @@ export const PRIORITY_RANK: Record<Priority, number> = {
 	option: 1,
 };
 
-export type FileViewLabel = string | ((filePath: string) => string);
+export type FileViewLabel =
+	| MessageDescriptor
+	| ((filePath: string) => MessageDescriptor);
 
 export interface FileView {
 	id: string;
@@ -46,8 +50,16 @@ export interface ViewProps {
 	 * ignore this.
 	 */
 	showFrontMatterNote?: boolean;
+	/**
+	 * Rendered inside another surface (the Changes pane's binary preview)
+	 * rather than filling its own pane: views drop pane-level chrome and
+	 * gestures that would fight the host's scrolling. Defaults to false.
+	 */
+	embedded?: boolean;
 }
 
 export function resolveViewLabel(view: FileView, filePath: string): string {
-	return typeof view.label === "function" ? view.label(filePath) : view.label;
+	return i18n._(
+		typeof view.label === "function" ? view.label(filePath) : view.label,
+	);
 }

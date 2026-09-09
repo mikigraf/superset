@@ -1,3 +1,4 @@
+import { useLingui } from "@lingui/react/macro";
 import type { CheckItem } from "@superset/local-db";
 import { useLiveQuery } from "@tanstack/react-db";
 import { useQueries } from "@tanstack/react-query";
@@ -116,12 +117,21 @@ export interface V2WorkspaceProjectOption {
 	count: number;
 }
 
+export interface V2WorkspaceCreatorOption {
+	userId: string;
+	name: string;
+	image: string | null;
+	isCurrentUser: boolean;
+	count: number;
+}
+
 export interface UseAccessibleV2WorkspacesResult {
 	all: AccessibleV2Workspace[];
 	/** Row-source settlement — gates empty states only, never rendered rows. */
 	isReady: boolean;
 	hostOptions: V2WorkspaceHostOption[];
 	projectOptions: V2WorkspaceProjectOption[];
+	creatorOptions: V2WorkspaceCreatorOption[];
 	hostsById: Map<
 		string,
 		{ hostName: string; isOnline: boolean; isLocal: boolean }
@@ -139,6 +149,8 @@ interface UseAccessibleV2WorkspacesOptions {
 	prStateFilters?: V2WorkspacesPrStateFilter[];
 	/** Empty/omitted = any agent status. */
 	agentStatusFilters?: V2WorkspacesAgentStatusFilter[];
+	/** Creator user ids; empty/omitted = any creator. */
+	creatorFilters?: string[];
 	/** Omitted = "all" — sidebar-pinned and unpinned alike. */
 	pinFilter?: V2WorkspacesPinFilter;
 	/**
@@ -197,6 +209,17 @@ function matchesPinFilter(
 		: !workspace.isInSidebar;
 }
 
+function matchesCreatorFilters(
+	workspace: AccessibleV2Workspace,
+	creatorFilters: string[],
+): boolean {
+	if (creatorFilters.length === 0) return true;
+	return (
+		workspace.createdByUserId != null &&
+		creatorFilters.includes(workspace.createdByUserId)
+	);
+}
+
 function matchesAgentStatusFilters(
 	workspace: AccessibleV2Workspace,
 	agentStatusFilters: V2WorkspacesAgentStatusFilter[],
@@ -221,11 +244,13 @@ function useStableByWorkspaceId<T>(entries: [string, T][]): Map<string, T> {
 export function useAccessibleV2Workspaces(
 	options: UseAccessibleV2WorkspacesOptions = {},
 ): UseAccessibleV2WorkspacesResult {
+	const { t } = useLingui();
 	const searchQuery = options.searchQuery ?? "";
 	const deviceFilter = options.deviceFilter;
 	const projectFilters = options.projectFilters ?? [];
 	const prStateFilters = options.prStateFilters ?? [];
 	const agentStatusFilters = options.agentStatusFilters ?? [];
+	const creatorFilters = options.creatorFilters ?? [];
 	const pinFilter = options.pinFilter ?? "all";
 	const { data: session } = authClient.useSession();
 	const collections = useCollections();
@@ -272,7 +297,7 @@ export function useAccessibleV2Workspaces(
 			presence
 				? rawHostRows.map((host) => ({
 						...host,
-						isOnline: presence.get(host.machineId) ?? host.isOnline,
+						isOnline: presence.get(host.machineId)?.online ?? host.isOnline,
 					}))
 				: rawHostRows,
 		[rawHostRows, presence],
@@ -405,8 +430,12 @@ export function useAccessibleV2Workspaces(
 						hostName:
 							host?.name ??
 							(workspace.hostId === machineId
-								? "This device"
-								: "Unknown device"),
+								? t({
+										message: "This device",
+									})
+								: t({
+										message: "Unknown device",
+									})),
 						hostIsOnline: host?.isOnline ?? workspace.hostReachable,
 						sidebarProjectId: null,
 						sidebarWorkspaceId: sessionSidebarState?.workspaceId ?? null,
@@ -448,7 +477,13 @@ export function useAccessibleV2Workspaces(
 					hostId: workspace.hostId,
 					hostName:
 						host?.name ??
-						(workspace.hostId === machineId ? "This device" : "Unknown device"),
+						(workspace.hostId === machineId
+							? t({
+									message: "This device",
+								})
+							: t({
+									message: "Unknown device",
+								})),
 					hostIsOnline: host?.isOnline ?? workspace.hostReachable,
 					sidebarProjectId: sidebarProjectIds.has(project.projectKey)
 						? project.projectKey
@@ -471,6 +506,7 @@ export function useAccessibleV2Workspaces(
 		sidebarProjectRows,
 		repoRows,
 		creatorRows,
+		t,
 	]);
 
 	// The authoritative link lives in host.db (`workspace.pullRequestId`), not
@@ -728,6 +764,7 @@ export function useAccessibleV2Workspaces(
 					matchesProjectFilters(workspace, projectFilters) &&
 					matchesPrStateFilters(workspace, prStateFilters) &&
 					matchesAgentStatusFilters(workspace, agentStatusFilters) &&
+					matchesCreatorFilters(workspace, creatorFilters) &&
 					matchesPinFilter(workspace, pinFilter),
 			),
 		[
@@ -735,6 +772,7 @@ export function useAccessibleV2Workspaces(
 			projectFilters,
 			prStateFilters,
 			agentStatusFilters,
+			creatorFilters,
 			pinFilter,
 		],
 	);
@@ -786,6 +824,44 @@ export function useAccessibleV2Workspaces(
 		);
 	}, [searchFiltered]);
 
+	// Anchored on org members, not the visible rows: a teammate must be
+	// filterable even while every one of their workspaces lives on a device
+	// this client can't currently reach (rows are host-served, so an offline
+	// device — or any remote device in a dev stack — contributes nothing to
+	// searchFiltered). Counts still track what's visible; row creators who
+	// have left the org keep an entry so their rows stay filterable.
+	const creatorOptions = useMemo<V2WorkspaceCreatorOption[]>(() => {
+		const byCreator = new Map<string, V2WorkspaceCreatorOption>();
+		for (const creator of creatorRows) {
+			byCreator.set(creator.id, {
+				userId: creator.id,
+				name: creator.name,
+				image: creator.image,
+				isCurrentUser: creator.id === currentUserId,
+				count: 0,
+			});
+		}
+		for (const workspace of searchFiltered) {
+			if (workspace.createdByUserId === null) continue;
+			const existing = byCreator.get(workspace.createdByUserId);
+			if (existing) {
+				existing.count += 1;
+				continue;
+			}
+			byCreator.set(workspace.createdByUserId, {
+				userId: workspace.createdByUserId,
+				name: workspace.createdByName ?? "Unknown",
+				image: workspace.createdByImage,
+				isCurrentUser: workspace.isCreatedByCurrentUser,
+				count: 1,
+			});
+		}
+		return Array.from(byCreator.values()).sort((a, b) => {
+			if (a.isCurrentUser !== b.isCurrentUser) return a.isCurrentUser ? -1 : 1;
+			return a.name.localeCompare(b.name);
+		});
+	}, [creatorRows, currentUserId, searchFiltered]);
+
 	const hostsById = useMemo(() => {
 		const map = new Map<
 			string,
@@ -827,6 +903,7 @@ export function useAccessibleV2Workspaces(
 		isReady,
 		hostOptions,
 		projectOptions,
+		creatorOptions,
 		hostsById,
 		projectsById,
 	};

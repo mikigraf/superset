@@ -1,11 +1,18 @@
 import fs from "node:fs/promises";
 import { homedir } from "node:os";
+import { msg } from "@lingui/core/macro";
+import { i18n } from "@superset/i18n";
 import { dialog } from "electron";
 import { menuEmitter } from "main/lib/menu-events";
 import { getOrg, setOrg } from "main/lib/window-registry/window-registry";
 import { getImageMimeType } from "shared/file-types";
 import { z } from "zod";
 import { publicProcedure, router } from "..";
+
+// Chromium renders zoom factors 0.25–5 (level = log1.2(factor)); stepping
+// past that would only bank presses that do nothing until the level walks back.
+const MIN_ZOOM_LEVEL = Math.log(0.25) / Math.log(1.2);
+const MAX_ZOOM_LEVEL = Math.log(5) / Math.log(1.2);
 
 export const createWindowRouter = () => {
 	return router({
@@ -79,6 +86,25 @@ export const createWindowRouter = () => {
 			return window.webContents.getZoomFactor();
 		}),
 
+		// Page zoom for the calling window, stepping like Electron's
+		// zoomIn/zoomOut/resetZoom menu roles (0.5 zoom levels, 0 = 100%).
+		zoom: publicProcedure
+			.input(z.object({ direction: z.enum(["in", "out", "reset"]) }))
+			.mutation(({ ctx, input }) => {
+				const window = ctx.senderWindow;
+				if (!window) return { success: false };
+				const { webContents } = window;
+				const next =
+					input.direction === "reset"
+						? 0
+						: webContents.getZoomLevel() +
+							(input.direction === "in" ? 0.5 : -0.5);
+				webContents.setZoomLevel(
+					Math.max(MIN_ZOOM_LEVEL, Math.min(MAX_ZOOM_LEVEL, next)),
+				);
+				return { success: true };
+			}),
+
 		getHomeDir: publicProcedure.query(() => {
 			return homedir();
 		}),
@@ -121,7 +147,13 @@ export const createWindowRouter = () => {
 
 				const result = await dialog.showOpenDialog(window, {
 					properties: ["openDirectory", "createDirectory"],
-					title: input?.title ?? "Select Directory",
+					title:
+						input?.title ??
+						i18n._(
+							msg({
+								message: "Select Directory",
+							}),
+						),
 					defaultPath: input?.defaultPath ?? undefined,
 				});
 
@@ -140,10 +172,18 @@ export const createWindowRouter = () => {
 
 			const result = await dialog.showOpenDialog(window, {
 				properties: ["openFile"],
-				title: "Select Organization Logo",
+				title: i18n._(
+					msg({
+						message: "Select Organization Logo",
+					}),
+				),
 				filters: [
 					{
-						name: "Images",
+						name: i18n._(
+							msg({
+								message: "Images",
+							}),
+						),
 						extensions: ["png", "jpg", "jpeg", "webp"],
 					},
 				],

@@ -1,3 +1,5 @@
+import { Trans } from "@lingui/react/macro";
+import { i18n } from "@superset/i18n";
 import { Button } from "@superset/ui/button";
 import {
 	Empty,
@@ -110,6 +112,9 @@ export function V2WorkspacesList({
 	const agentStatusFilters = useV2WorkspacesFilterStore(
 		(state) => state.agentStatusFilters,
 	);
+	const creatorFilters = useV2WorkspacesFilterStore(
+		(state) => state.creatorFilters,
+	);
 	const pinFilter = useV2WorkspacesFilterStore((state) => state.pinFilter);
 	const resetFilters = useV2WorkspacesFilterStore((state) => state.reset);
 	const archivedWindow = useV2WorkspacesFilterStore(
@@ -128,6 +133,7 @@ export function V2WorkspacesList({
 		projectFilters.length > 0 ||
 		prStateFilters.length > 0 ||
 		agentStatusFilters.length > 0 ||
+		creatorFilters.length > 0 ||
 		pinFilter !== "all" ||
 		// A narrowed archive window can hide every row (e.g. all tombstones
 		// with "Hide archived") — that's a filter, not an empty account.
@@ -147,20 +153,24 @@ export function V2WorkspacesList({
 						{hasActiveFilters ? <LuSearchX /> : <LuLayers />}
 					</EmptyMedia>
 					<EmptyTitle>
-						{hasActiveFilters
-							? "No workspaces match your filters"
-							: "No workspaces yet"}
+						{hasActiveFilters ? (
+							<Trans>No workspaces match your filters</Trans>
+						) : (
+							<Trans>No workspaces yet</Trans>
+						)}
 					</EmptyTitle>
 					<EmptyDescription>
-						{hasActiveFilters
-							? "Try a different search term or another device."
-							: "Workspaces on this device will show up here."}
+						{hasActiveFilters ? (
+							<Trans>Try a different search term or another device.</Trans>
+						) : (
+							<Trans>Workspaces on this device will show up here.</Trans>
+						)}
 					</EmptyDescription>
 				</EmptyHeader>
 				{hasActiveFilters ? (
 					<EmptyContent>
 						<Button variant="outline" size="sm" onClick={() => resetFilters()}>
-							Clear filters
+							<Trans>Clear filters</Trans>
 						</Button>
 					</EmptyContent>
 				) : null}
@@ -169,7 +179,8 @@ export function V2WorkspacesList({
 	}
 
 	return (
-		<div className="min-h-0 flex-1 overflow-y-auto">
+		// @container so rows can shed metadata as the pane narrows.
+		<div className="@container min-h-0 flex-1 overflow-y-auto">
 			{sections.map((section) => (
 				<StatusSectionGroup
 					key={section.column}
@@ -236,7 +247,7 @@ function StatusSectionGroup({
 					<BoardColumnIcon column={section.column} />
 				</span>
 				<h3 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-					{BOARD_COLUMN_LABELS[section.column]}
+					{i18n._(BOARD_COLUMN_LABELS[section.column])}
 				</h3>
 				<span className="shrink-0 text-[11px] tabular-nums text-muted-foreground/70">
 					{section.workspaces.length}

@@ -1,3 +1,4 @@
+import { Trans, useLingui } from "@lingui/react/macro";
 import {
 	AlertDialog,
 	AlertDialogAction,
@@ -17,8 +18,10 @@ import { useLeaderboardOptIn } from "renderer/routes/_authenticated/hooks/useLea
 import { useLocalHostService } from "renderer/routes/_authenticated/providers/LocalHostServiceProvider";
 import { HighlightText } from "renderer/routes/_authenticated/settings/components/HighlightText";
 import { useSettingsSearchQuery } from "renderer/stores/settings-state";
+import { ProfileFields } from "./components/ProfileFields";
 
 export function LeaderboardSection() {
+	const { t } = useLingui();
 	const searchQuery = useSettingsSearchQuery();
 	const { activeHostUrl } = useLocalHostService();
 	const { handle, isLoading, optedIn, join, leave, joining } =
@@ -44,20 +47,25 @@ export function LeaderboardSection() {
 			<div className="flex items-start justify-between gap-6">
 				<div className="space-y-1 flex-1">
 					<Label htmlFor="leaderboard-opt-in" className="text-sm font-medium">
-						<HighlightText text="Public leaderboard" query={searchQuery} />
+						<HighlightText
+							text={t({
+								message: "Public leaderboard",
+							})}
+							query={searchQuery}
+						/>
 					</Label>
 					<p className="text-xs text-muted-foreground">
 						{optedIn && handle ? (
-							<>
+							<Trans>
 								Publishing as <span className="text-foreground">{handle}</span>.
 								Token counts and model names only, no repo names, file paths or
 								prompts.
-							</>
+							</Trans>
 						) : (
-							<>
+							<Trans>
 								Rank your agent usage against other engineers. Token counts and
 								model names only, no repo names, file paths or prompts.
-							</>
+							</Trans>
 						)}
 					</p>
 				</div>
@@ -71,6 +79,8 @@ export function LeaderboardSection() {
 					}}
 				/>
 			</div>
+
+			{optedIn && handle && <ProfileFields handle={handle} />}
 
 			<LeaderboardJoinDialog
 				open={joinOpen}
@@ -87,21 +97,27 @@ export function LeaderboardSection() {
 			<AlertDialog open={leaveOpen} onOpenChange={setLeaveOpen}>
 				<AlertDialogContent>
 					<AlertDialogHeader>
-						<AlertDialogTitle>Leave the leaderboard?</AlertDialogTitle>
+						<AlertDialogTitle>
+							<Trans>Leave the leaderboard?</Trans>
+						</AlertDialogTitle>
 						<AlertDialogDescription>
-							Everything you've published is deleted, not hidden. You can rejoin
-							later and it will rebuild from the transcripts still on this
-							machine — only your past ranking is lost.
+							<Trans>
+								Everything you've published is deleted, not hidden. You can
+								rejoin later and it will rebuild from the transcripts still on
+								this machine — only your past ranking is lost.
+							</Trans>
 						</AlertDialogDescription>
 					</AlertDialogHeader>
 					<AlertDialogFooter>
-						<AlertDialogCancel>Cancel</AlertDialogCancel>
+						<AlertDialogCancel>
+							<Trans>Cancel</Trans>
+						</AlertDialogCancel>
 						<AlertDialogAction
 							onClick={async () => {
 								if (await leave()) setLeaveOpen(false);
 							}}
 						>
-							Leave and delete
+							<Trans>Leave and delete</Trans>
 						</AlertDialogAction>
 					</AlertDialogFooter>
 				</AlertDialogContent>

@@ -17,13 +17,10 @@ const withMDX = createMDX();
 /** @type {import('next').NextConfig} */
 const config = {
 	reactStrictMode: true,
-	images: {
-		remotePatterns: [
-			{
-				protocol: "https",
-				hostname: "*.public.blob.vercel-storage.com",
-			},
-		],
+	// Compiles @lingui/react/macro at build time. Version must stay in
+	// lockstep with Next's swc_core ABI — see plans/20260826-i18n-strategy.md.
+	experimental: {
+		swcPlugins: [["@lingui/swc-plugin", {}]],
 	},
 	async redirects() {
 		return [
@@ -39,6 +36,11 @@ const config = {
 				permanent: true,
 			},
 			// Old top-level entry points from the previous docs structure (were 404ing).
+			{
+				source: "/guides/workspace-management",
+				destination: "/workspaces",
+				permanent: true,
+			},
 			{
 				source: "/getting-started",
 				destination: "/overview",

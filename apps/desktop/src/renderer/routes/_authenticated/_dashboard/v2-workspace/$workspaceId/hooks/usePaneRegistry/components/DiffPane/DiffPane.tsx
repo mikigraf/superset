@@ -1,6 +1,9 @@
+import { useLingui } from "@lingui/react/macro";
 import type {
 	CodeViewItem,
 	DiffLineAnnotation,
+	FileDiffLoadedFiles,
+	FileDiffMetadata,
 	LineAnnotation,
 	FileContents as PierreFileContents,
 } from "@pierre/diffs";
@@ -10,19 +13,22 @@ import {
 	type CodeViewHandle,
 	EditProvider,
 } from "@pierre/diffs/react";
+import { errorMessage } from "@superset/i18n/errors";
 
 import type { RendererContext } from "@superset/panes";
 import { alert } from "@superset/ui/atoms/Alert";
-import { Button } from "@superset/ui/button";
 import { toast } from "@superset/ui/sonner";
-import { workspaceTrpc } from "@superset/workspace-client";
+import { useWorkspaceClient, workspaceTrpc } from "@superset/workspace-client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { LuFileCode } from "react-icons/lu";
+import { useWorkspaceEvent } from "renderer/hooks/host-service/useWorkspaceEvent";
 import {
 	createPaneScrollStateKey,
 	getPaneScrollState,
 	savePaneScrollState,
 } from "renderer/routes/_authenticated/_dashboard/v2-workspace/$workspaceId/state/paneScrollStateCache";
+import { DiffFileCollapseButton } from "renderer/screens/main/components/DiffFileCollapseButton";
+import { DiffFileHeaderName } from "renderer/screens/main/components/DiffFileHeaderName";
+import { DiffViewToolbar } from "renderer/screens/main/components/DiffViewToolbar";
 import { MarkdownSearch } from "renderer/screens/main/components/WorkspaceView/ContentView/TabsContent/TabView/FileViewerPane/components/MarkdownSearch";
 import { toAbsoluteWorkspacePath } from "shared/absolute-paths";
 import type { DiffPaneData, PaneViewerData } from "../../../../types";
@@ -35,10 +41,11 @@ import { useOpenInExternalEditor } from "../../../useOpenInExternalEditor";
 import { useSidebarDiffRef } from "../../../useSidebarDiffRef";
 import { useViewedFiles } from "../../../useViewedFiles";
 import { AgentCommentComposer } from "../AgentCommentComposer";
+import { BinaryDiffPreview } from "./components/BinaryDiffPreview";
 import { CommentThread } from "./components/CommentThread";
+import { DeferredDiffPlaceholder } from "./components/DeferredDiffPlaceholder";
 import { DiffHeaderMetadata } from "./components/DiffHeaderMetadata";
-import { DiffHeaderPrefix } from "./components/DiffHeaderPrefix";
-import { DiffSectionBar } from "./components/DiffSectionBar";
+import { DiffSectionLabel } from "./components/DiffSectionLabel";
 import { useDiffActiveSection } from "./hooks/useDiffActiveSection";
 import {
 	type DiffAnnotationMetadata,
@@ -46,9 +53,15 @@ import {
 } from "./hooks/useDiffAnnotations";
 import { useDiffCodeViewItems } from "./hooks/useDiffCodeViewItems";
 import { useDiffCodeViewScroll } from "./hooks/useDiffCodeViewScroll";
-import { useDiffCodeViewTheme } from "./hooks/useDiffCodeViewTheme";
+import { useDiffCardCodeViewTheme } from "./hooks/useDiffCodeViewTheme";
 import { useDiffCommentComposer } from "./hooks/useDiffCommentComposer";
+import { useDiffCommentNavigation } from "./hooks/useDiffCommentNavigation";
 import { useDiffPaneSearch } from "./hooks/useDiffPaneSearch";
+import { createGetDiffInput } from "./utils/createGetDiffInput";
+import {
+	isDiffContentStale,
+	isDiffContentTooLarge,
+} from "./utils/diffLoadingGuards";
 import { getCharacterOffsetAtClientX } from "./utils/getCharacterOffsetAtClientX";
 
 interface CreateNewAgentSessionInput {
@@ -83,6 +96,7 @@ export function DiffPane({
 	onOpenFile,
 	onCreateNewAgentSession,
 }: DiffPaneProps) {
+	const { t } = useLingui();
 	const data = context.pane.data as DiffPaneData;
 	const codeViewRef = useRef<CodeViewHandle<DiffAnnotationMetadata>>(null);
 	const searchContainerRef = useRef<HTMLDivElement>(null);
@@ -109,8 +123,29 @@ export function DiffPane({
 	const workspaceQuery = workspaceTrpc.workspace.get.useQuery({
 		id: workspaceId,
 	});
+	const worktreePath = workspaceQuery.data?.worktreePath;
 	const writeFile = workspaceTrpc.filesystem.writeFile.useMutation();
 	const utils = workspaceTrpc.useUtils();
+	const { trpcClient } = useWorkspaceClient();
+	// Binary previews of the index or HEAD side don't change their query key
+	// when git state moves, so refetch them on git events. Scope to the
+	// reported paths when we have them so an unrelated edit doesn't refetch
+	// every preview on screen. The working-tree side follows the shared
+	// document store's fs watch and needs nothing here.
+	useWorkspaceEvent(
+		"git:changed",
+		workspaceId,
+		({ paths }) => {
+			if (!paths) {
+				void utils.git.readDiffSideFile.invalidate({ workspaceId });
+				return;
+			}
+			for (const path of paths) {
+				void utils.git.readDiffSideFile.invalidate({ workspaceId, path });
+			}
+		},
+		!!worktreePath,
+	);
 	const [editingSet, setEditingSet] = useState<ReadonlySet<string>>(new Set());
 	const [dirtyItemIds, setDirtyItemIds] = useState<ReadonlySet<string>>(
 		new Set(),
@@ -147,6 +182,26 @@ export function DiffPane({
 		[updateData],
 	);
 
+	// Collapsing the sticky navigation target has to release the target in the
+	// same write — useDiffCodeViewScroll keeps the last-clicked file expanded
+	// while its sticky tracking is armed, so a plain setCollapsed on that file
+	// gets immediately undone (verified live: collapse-all left the clicked
+	// file open).
+	const clearTargetAndCollapse = useCallback(
+		(collapsedFiles: string[]) => {
+			updateData({
+				...dataRef.current,
+				path: "",
+				changeKey: undefined,
+				focusLine: undefined,
+				focusSide: undefined,
+				focusTick: undefined,
+				collapsedFiles,
+			} as PaneViewerData);
+		},
+		[updateData],
+	);
+
 	// fileByItemId is produced by useDiffCodeViewItems below, but the composer
 	// hook needs access to look files up at submit time. Funnel through a
 	// stable ref so the composer hook can be wired before items are computed
@@ -170,16 +225,15 @@ export function DiffPane({
 		onCreateNewAgentSession,
 	});
 
-	const { items, fileByItemId, hasPendingDiff, hasDiffError } =
-		useDiffCodeViewItems({
-			workspaceId,
-			files,
-			collapsedSet,
-			editingSet,
-			editorRevisionByItemId,
-			annotationsByPath: threadAnnotationsByPath,
-			extraAnnotationsByItemId: composerAnnotationsByItemId,
-		});
+	const { items, fileByItemId, requestDiff } = useDiffCodeViewItems({
+		workspaceId,
+		files,
+		collapsedSet,
+		editingSet,
+		editorRevisionByItemId,
+		annotationsByPath: threadAnnotationsByPath,
+		extraAnnotationsByItemId: composerAnnotationsByItemId,
+	});
 	fileByItemIdRef.current = fileByItemId;
 
 	const saveEditedItem = useCallback(
@@ -189,9 +243,16 @@ export function DiffPane({
 			const worktreePath = workspaceQuery.data?.worktreePath;
 			if (!editedFile) return true;
 			if (!file || !worktreePath) {
-				toast.error("Couldn't save edits", {
-					description: "The workspace is not ready yet. Try again.",
-				});
+				toast.error(
+					t({
+						message: "Couldn't save edits",
+					}),
+					{
+						description: t({
+							message: "The workspace is not ready yet. Try again.",
+						}),
+					},
+				);
 				return false;
 			}
 			try {
@@ -202,12 +263,22 @@ export function DiffPane({
 					encoding: "utf-8",
 				});
 				if (!result.ok) {
-					toast.error("Couldn't save edits", {
-						description:
-							result.reason === "conflict"
-								? "The file changed on disk. Review it before saving again."
-								: "The file could not be written.",
-					});
+					toast.error(
+						t({
+							message: "Couldn't save edits",
+						}),
+						{
+							description:
+								result.reason === "conflict"
+									? t({
+											message:
+												"The file changed on disk. Review it before saving again.",
+										})
+									: t({
+											message: "The file could not be written.",
+										}),
+						},
+					);
 					return false;
 				}
 				setDirtyItemIds((current) => {
@@ -217,12 +288,16 @@ export function DiffPane({
 				});
 				void utils.git.getStatus.invalidate({ workspaceId });
 				void utils.git.getDiff.invalidate({ workspaceId });
-				void utils.git.getDiffBulk.invalidate({ workspaceId });
 				return true;
 			} catch (error) {
-				toast.error("Couldn't save edits", {
-					description: error instanceof Error ? error.message : String(error),
-				});
+				toast.error(
+					t({
+						message: "Couldn't save edits",
+					}),
+					{
+						description: errorMessage(error),
+					},
+				);
 				return false;
 			}
 		},
@@ -232,6 +307,7 @@ export function DiffPane({
 			writeFile,
 			workspaceId,
 			utils,
+			t,
 		],
 	);
 
@@ -267,12 +343,21 @@ export function DiffPane({
 				return;
 			}
 			const file = fileByItemId.get(itemId);
+			const name =
+				file?.path.split("/").pop() ??
+				t({
+					message: "this file",
+				});
 			alert({
-				title: `Do you want to save the changes you made to ${file?.path.split("/").pop() ?? "this file"}?`,
-				description: "Your changes will be lost if you don't save them.",
+				title: t({
+					message: `Do you want to save the changes you made to ${name}?`,
+				}),
+				description: t({
+					message: "Your changes will be lost if you don't save them.",
+				}),
 				actions: [
 					{
-						label: "Save",
+						label: t({ message: "Save" }),
 						onClick: () => {
 							void saveEditedItem(itemId).then((saved) => {
 								if (saved) exitEditing(itemId);
@@ -280,15 +365,28 @@ export function DiffPane({
 						},
 					},
 					{
-						label: "Don't Save",
+						label: t({
+							message: "Don't Save",
+						}),
 						variant: "secondary",
 						onClick: () => discardEditing(itemId),
 					},
-					{ label: "Cancel", variant: "ghost", onClick: () => {} },
+					{
+						label: t({ message: "Cancel" }),
+						variant: "ghost",
+						onClick: () => {},
+					},
 				],
 			});
 		},
-		[dirtyItemIds, discardEditing, exitEditing, fileByItemId, saveEditedItem],
+		[
+			dirtyItemIds,
+			discardEditing,
+			exitEditing,
+			fileByItemId,
+			saveEditedItem,
+			t,
+		],
 	);
 
 	const search = useDiffPaneSearch({
@@ -313,9 +411,31 @@ export function DiffPane({
 		initialScrollState,
 	});
 
-	// The section bar lives outside the scroller: Pierre pins one header at a
-	// time within its own box, so a body-less in-flow section item couldn't stay
-	// pinned across its group.
+	const commentNav = useDiffCommentNavigation({
+		codeViewRef,
+		items,
+		fileByItemId,
+		collapsedSet,
+		setCollapsed,
+	});
+
+	const areAllFilesCollapsed =
+		files.length > 0 &&
+		files.every((f) => collapsedSet.has(getChangesetFileKey(f)));
+	const handleToggleCollapseAll = useCallback(() => {
+		if (areAllFilesCollapsed) {
+			updateData({
+				...dataRef.current,
+				collapsedFiles: [],
+			} as PaneViewerData);
+			return;
+		}
+		clearTargetAndCollapse(files.map((f) => getChangesetFileKey(f)));
+	}, [updateData, areAllFilesCollapsed, files, clearTargetAndCollapse]);
+
+	// The section label lives in the toolbar, outside the scroller: Pierre pins
+	// one header at a time within its own box, so a body-less in-flow section
+	// item couldn't stay pinned across its group.
 	const { currentSection, onScroll } = useDiffActiveSection({
 		codeViewRef,
 		items,
@@ -330,11 +450,47 @@ export function DiffPane({
 		},
 		[scrollStateKey, onScroll, notifyScroll],
 	);
-	const { options, style } = useDiffCodeViewTheme();
+	const { options, style } = useDiffCardCodeViewTheme();
+
+	// Patches carry hunks with three lines of context; @pierre/diffs calls this
+	// when it needs the rest of a file — expanding context, or entering edit
+	// mode — so whole files only cross the wire for files somebody opens.
+	const loadDiffFiles = useCallback(
+		async (fileDiff: FileDiffMetadata) => {
+			const file =
+				files.find((candidate) => candidate.path === fileDiff.name) ??
+				files.find((candidate) => candidate.path === fileDiff.prevName);
+			if (!file) throw new Error(`no changeset file for ${fileDiff.name}`);
+			const { oldFile, newFile } = await trpcClient.git.getDiff.query(
+				createGetDiffInput(workspaceId, file),
+			);
+			if (isDiffContentTooLarge(oldFile.contents, newFile.contents)) {
+				// Parsing this much text on the main thread is the freeze the
+				// pane is built to avoid; leaving the diff partial keeps the
+				// hunks we already have.
+				throw new Error(`${file.path} is too large to expand`);
+			}
+			const loaded: FileDiffLoadedFiles =
+				fileDiff.type === "rename-pure"
+					? { oldFile: null, newFile }
+					: { oldFile, newFile };
+			if (isDiffContentStale(fileDiff, loaded)) {
+				// The file moved on after its patch was cached, so these lines
+				// don't line up with the hunks they'd be hydrated into.
+				// Staying partial keeps the patch's hunks on screen instead of
+				// tearing the pane down; the `git:changed` that follows the
+				// write refetches the patch, and expanding works again.
+				throw new Error(`${file.path} changed since its diff was loaded`);
+			}
+			return loaded;
+		},
+		[files, trpcClient, workspaceId],
+	);
 
 	const codeViewOptions = useMemo(
 		() => ({
 			...options,
+			loadDiffFiles,
 			enableLineSelection: true,
 			enableGutterUtility: true,
 			onGutterUtilityClick,
@@ -391,6 +547,7 @@ export function DiffPane({
 			},
 		}),
 		[
+			loadDiffFiles,
 			options,
 			onGutterUtilityClick,
 			onLineSelectionEnd,
@@ -404,15 +561,42 @@ export function DiffPane({
 			const file = fileByItemId.get(item.id);
 			if (!file) return null;
 			const changeKey = getChangesetFileKey(file);
+			const collapsed = collapsedSet.has(changeKey);
 			return (
-				<DiffHeaderPrefix
-					file={file}
-					collapsed={collapsedSet.has(changeKey)}
-					onSetCollapsed={(value) => setCollapsed(changeKey, value)}
+				<DiffFileCollapseButton
+					collapsed={collapsed}
+					onToggle={() => {
+						if (!collapsed && item.id === targetItemId) {
+							clearTargetAndCollapse([
+								...(dataRef.current.collapsedFiles ?? []),
+								changeKey,
+							]);
+							return;
+						}
+						setCollapsed(changeKey, !collapsed);
+					}}
 				/>
 			);
 		},
-		[fileByItemId, collapsedSet, setCollapsed],
+		[
+			fileByItemId,
+			collapsedSet,
+			setCollapsed,
+			targetItemId,
+			clearTargetAndCollapse,
+		],
+	);
+
+	// The card CSS hides Pierre's native [data-title] (the full relative
+	// path), so this suffix is the header's only title: filename first, then
+	// the containing directory in the muted color.
+	const renderHeaderFilenameSuffix = useCallback(
+		(item: CodeViewItem<DiffAnnotationMetadata>) => {
+			const file = fileByItemId.get(item.id);
+			if (!file) return null;
+			return <DiffFileHeaderName path={file.path} />;
+		},
+		[fileByItemId],
 	);
 
 	const renderHeaderMetadata = useCallback(
@@ -522,7 +706,23 @@ export function DiffPane({
 				if (item.type !== "file") return null;
 				const file = fileByItemId.get(item.id);
 				if (!file) return null;
-				return <BinaryDiffPlaceholder file={file} onOpenFile={onOpenFile} />;
+				return (
+					<BinaryDiffPreview
+						file={file}
+						workspaceId={workspaceId}
+						worktreePath={worktreePath}
+						onOpenFile={onOpenFile}
+					/>
+				);
+			}
+			if (m.kind === "deferred-placeholder") {
+				if (item.type !== "file") return null;
+				return (
+					<DeferredDiffPlaceholder
+						reason={m.reason}
+						onRequest={() => requestDiff(item.id)}
+					/>
+				);
 			}
 			if (m.kind === "composer") {
 				if (item.type !== "diff") return null;
@@ -531,10 +731,16 @@ export function DiffPane({
 						workspaceId={workspaceId}
 						contextLabel={
 							m.startLine === m.endLine
-								? `Line ${m.startLine}`
-								: `Lines ${m.startLine}–${m.endLine}`
+								? t({
+										message: `Line ${m.startLine}`,
+									})
+								: t({
+										message: `Lines ${m.startLine}–${m.endLine}`,
+									})
 						}
-						placeholder="Ask the AI about these lines…"
+						placeholder={t({
+							message: "Ask the AI about these lines…",
+						})}
 						onCancel={clearComposer}
 						onSubmit={submitComposer}
 					/>
@@ -557,7 +763,14 @@ export function DiffPane({
 					isOutdated={m.isOutdated}
 					url={m.url}
 					comments={m.comments}
-					focusTick={focused ? data.focusTick : undefined}
+					replyToCommentId={m.replyToCommentId}
+					focusTick={
+						focused
+							? data.focusTick
+							: commentNav.isNavFocused(m.threadId)
+								? commentNav.navFocusTick
+								: undefined
+					}
 				/>
 			);
 		},
@@ -570,96 +783,79 @@ export function DiffPane({
 			clearComposer,
 			submitComposer,
 			fileByItemId,
+			requestDiff,
 			onOpenFile,
+			commentNav.isNavFocused,
+			commentNav.navFocusTick,
+			t,
+			worktreePath,
 		],
 	);
 
-	if (files.length === 0) {
-		return (
-			<div className="flex h-full w-full items-center justify-center text-sm text-muted-foreground">
-				{isLoading ? "Loading…" : "No changes"}
-			</div>
-		);
-	}
-
-	if (items.length === 0) {
-		return (
-			<div className="flex h-full w-full cursor-text select-text items-center justify-center text-sm text-muted-foreground">
-				{hasPendingDiff
-					? "Loading…"
-					: hasDiffError
-						? "Unable to load diff"
-						: null}
-			</div>
-		);
-	}
-
 	return (
-		<div className="flex h-full w-full flex-col">
-			{currentSection ? (
-				<DiffSectionBar
-					kind={currentSection.kind}
-					count={currentSection.count}
-				/>
-			) : null}
-			<div
-				ref={searchContainerRef}
-				className="relative min-h-0 w-full flex-1"
-				onKeyDownCapture={handleEditorKeyDownCapture}
+		<div className="flex h-full min-h-0 w-full min-w-0 flex-col">
+			<DiffViewToolbar
+				areAllFilesCollapsed={areAllFilesCollapsed}
+				onToggleCollapseAll={handleToggleCollapseAll}
+				commentNav={{
+					focusedIndex: commentNav.focusedThreadIndex,
+					total: commentNav.orderedThreads.length,
+					onPrev: commentNav.goToPrevComment,
+					onNext: commentNav.goToNextComment,
+				}}
 			>
-				<MarkdownSearch
-					isOpen={search.isSearchOpen}
-					query={search.query}
-					caseSensitive={search.caseSensitive}
-					matchCount={search.matchCount}
-					activeMatchIndex={search.activeMatchIndex}
-					onQueryChange={search.setQuery}
-					onCaseSensitiveChange={search.setCaseSensitive}
-					onFindNext={search.findNext}
-					onFindPrevious={search.findPrevious}
-					onClose={search.closeSearch}
-				/>
-				<EditProvider<DiffAnnotationMetadata> createEditor={createEditor}>
-					<CodeView<DiffAnnotationMetadata>
-						ref={codeViewRef}
-						className="h-full w-full overflow-y-auto overflow-x-clip overscroll-contain [overflow-anchor:none]"
-						style={style}
-						items={items}
-						options={codeViewOptions}
-						onScroll={handleScroll}
-						renderHeaderPrefix={renderHeaderPrefix}
-						renderHeaderMetadata={renderHeaderMetadata}
-						renderAnnotation={renderAnnotation}
-						onItemEditChange={handleItemEditChange}
+				{currentSection ? (
+					<DiffSectionLabel
+						kind={currentSection.kind}
+						count={currentSection.count}
 					/>
-				</EditProvider>
-			</div>
-		</div>
-	);
-}
-
-function BinaryDiffPlaceholder({
-	file,
-	onOpenFile,
-}: {
-	file: ChangesetFile;
-	onOpenFile: (path: string, openInNewTab?: boolean) => void;
-}) {
-	const canOpen = file.status !== "deleted";
-
-	return (
-		<div className="flex flex-col items-center justify-center gap-3 bg-muted/30 py-8 text-muted-foreground">
-			<LuFileCode className="size-8" />
-			<p className="cursor-text select-text text-sm">Binary file hidden</p>
-			{canOpen ? (
-				<Button
-					variant="outline"
-					size="sm"
-					onClick={() => onOpenFile(file.path)}
+				) : null}
+			</DiffViewToolbar>
+			{files.length === 0 ? (
+				// The toolbar stays up while the current filter yields nothing;
+				// the sidebar's Changes tab holds the filter/branch controls.
+				<div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+					{isLoading
+						? t({ message: "Loading…" })
+						: t({
+								message: "No changes",
+							})}
+				</div>
+			) : (
+				<div
+					ref={searchContainerRef}
+					className="relative min-h-0 w-full flex-1"
+					onKeyDownCapture={handleEditorKeyDownCapture}
 				>
-					Open file
-				</Button>
-			) : null}
+					<MarkdownSearch
+						isOpen={search.isSearchOpen}
+						query={search.query}
+						caseSensitive={search.caseSensitive}
+						matchCount={search.matchCount}
+						activeMatchIndex={search.activeMatchIndex}
+						onQueryChange={search.setQuery}
+						onCaseSensitiveChange={search.setCaseSensitive}
+						onFindNext={search.findNext}
+						onFindPrevious={search.findPrevious}
+						onClose={search.closeSearch}
+					/>
+					<EditProvider<DiffAnnotationMetadata> createEditor={createEditor}>
+						<CodeView<DiffAnnotationMetadata>
+							ref={codeViewRef}
+							className="h-full w-full overflow-y-auto overflow-x-clip overscroll-contain px-3 [overflow-anchor:none]"
+							style={style}
+							items={items}
+							options={codeViewOptions}
+							onScroll={handleScroll}
+							renderHeaderPrefix={renderHeaderPrefix}
+							renderHeaderFilenameSuffix={renderHeaderFilenameSuffix}
+							renderHeaderMetadata={renderHeaderMetadata}
+							renderAnnotation={renderAnnotation}
+							onItemEditChange={handleItemEditChange}
+						/>
+					</EditProvider>
+				</div>
+			)}
 		</div>
 	);
 }

@@ -1,3 +1,7 @@
+import type { MessageDescriptor } from "@lingui/core";
+import { msg } from "@lingui/core/macro";
+import { Trans } from "@lingui/react/macro";
+import { i18n } from "@superset/i18n";
 import { OverflowFadeContainer } from "@superset/ui/overflow-fade-container";
 import { memo, useMemo } from "react";
 import type { ChangesetFile } from "renderer/routes/_authenticated/_dashboard/v2-workspace/$workspaceId/hooks/useChangeset";
@@ -14,11 +18,14 @@ export interface FoldSignal {
 
 interface ChangesFileListProps {
 	files: ChangesetFile[];
+	/** True while a toolbar search query is active — flips the empty copy. */
+	isFiltered?: boolean;
 	workspaceId: string;
 	isLoading?: boolean;
 	viewMode: ChangesViewMode;
 	worktreePath?: string;
 	selectedFilePath?: string;
+	selectedChangeKey?: string;
 	foldSignal: FoldSignal;
 	onSelectFile?: (
 		path: string,
@@ -38,20 +45,28 @@ const GROUP_ORDER: GroupKey[] = [
 	"commit",
 ];
 
-const GROUP_TITLES: Record<GroupKey, string> = {
-	unstaged: "Unstaged",
-	staged: "Staged",
-	"against-base": "Against base",
-	commit: "Committed",
+const GROUP_TITLES: Record<GroupKey, MessageDescriptor> = {
+	unstaged: msg({
+		message: "Unstaged",
+	}),
+	staged: msg({ message: "Staged" }),
+	"against-base": msg({
+		message: "Against base",
+	}),
+	commit: msg({
+		message: "Committed",
+	}),
 };
 
 export const ChangesFileList = memo(function ChangesFileList({
 	files,
+	isFiltered,
 	workspaceId,
 	isLoading,
 	viewMode,
 	worktreePath,
 	selectedFilePath,
+	selectedChangeKey,
 	foldSignal,
 	onSelectFile,
 	onOpenFile,
@@ -73,7 +88,7 @@ export const ChangesFileList = memo(function ChangesFileList({
 	if (isLoading) {
 		return (
 			<div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-				Loading...
+				<Trans>Loading...</Trans>
 			</div>
 		);
 	}
@@ -81,7 +96,11 @@ export const ChangesFileList = memo(function ChangesFileList({
 	if (files.length === 0) {
 		return (
 			<div className="px-3 py-6 text-center text-sm text-muted-foreground">
-				No changes
+				{isFiltered ? (
+					<Trans>No files match your search</Trans>
+				) : (
+					<Trans>No changes</Trans>
+				)}
 			</div>
 		);
 	}
@@ -100,8 +119,10 @@ export const ChangesFileList = memo(function ChangesFileList({
 					<ChangesSection
 						key={key}
 						sectionKey={key}
-						title={GROUP_TITLES[key]}
+						title={i18n._(GROUP_TITLES[key])}
 						count={groupFiles.length}
+						additions={groupFiles.reduce((sum, f) => sum + f.additions, 0)}
+						deletions={groupFiles.reduce((sum, f) => sum + f.deletions, 0)}
 						stagingActions={
 							hasStagingActions
 								? { kind: key as "unstaged" | "staged", workspaceId }
@@ -115,6 +136,7 @@ export const ChangesFileList = memo(function ChangesFileList({
 								workspaceId={workspaceId}
 								worktreePath={worktreePath}
 								selectedFilePath={selectedFilePath}
+								selectedChangeKey={selectedChangeKey}
 								foldSignal={foldSignal}
 								onSelectFile={onSelectFile}
 								onOpenFile={onOpenFile}
@@ -125,6 +147,8 @@ export const ChangesFileList = memo(function ChangesFileList({
 								files={groupFiles}
 								workspaceId={workspaceId}
 								worktreePath={worktreePath}
+								selectedFilePath={selectedFilePath}
+								selectedChangeKey={selectedChangeKey}
 								foldSignal={foldSignal}
 								onSelectFile={onSelectFile}
 								onOpenFile={onOpenFile}
